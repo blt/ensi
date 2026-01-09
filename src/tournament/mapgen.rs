@@ -236,8 +236,19 @@ fn find_starting_positions(
 }
 
 /// Create players and their starting cities.
+///
+/// Each player gets:
+/// - Capital city with 100 population and 10 army
+/// - 4 adjacent territory tiles (for stable starting economy)
+///
+/// With 5 territory tiles, starting food balance is positive:
+/// - production = sqrt(100) × sqrt(5) × 7 ≈ 156
+/// - consumption = 100 + 10 = 110
+/// - balance = +46 (sustainable growth)
 fn create_players(map: &mut Map, starting_positions: &[Coord]) -> Vec<Player> {
     let mut players = Vec::with_capacity(starting_positions.len());
+    let width = map.width();
+    let height = map.height();
 
     for (i, &coord) in starting_positions.iter().enumerate() {
         // Player IDs are 1-indexed
@@ -249,6 +260,19 @@ fn create_players(map: &mut Map, starting_positions: &[Coord]) -> Vec<Player> {
         capital.owner = Some(player_id);
         capital.army = 10; // Small starting army
         map.set(coord, capital);
+
+        // Give player starting territory (4 adjacent tiles)
+        // This ensures positive food balance from turn 0
+        for adj in coord.adjacent(width, height) {
+            if let Some(tile) = map.get(adj) {
+                // Only claim passable tiles that aren't already cities
+                if tile.tile_type.is_passable() && tile.tile_type != TileType::City {
+                    let mut territory = Tile::desert();
+                    territory.owner = Some(player_id);
+                    map.set(adj, territory);
+                }
+            }
+        }
 
         // Create player
         players.push(Player::new(player_id, coord));
@@ -364,6 +388,77 @@ mod tests {
             assert_eq!(tile.owner, Some(player.id));
             assert_eq!(tile.population, 100);
             assert_eq!(tile.army, 10);
+        }
+    }
+
+    #[test]
+    fn test_starting_territory() {
+        let (map, players) = generate_map(42, 64, 64, 2).unwrap();
+
+        for player in &players {
+            // Count owned tiles
+            let owned_count = map
+                .iter()
+                .filter(|(_, tile)| tile.owner == Some(player.id))
+                .count();
+
+            // Should have at least 3 tiles (capital + 2 adjacent minimum)
+            // Maximum is 5 tiles (capital + 4 adjacent)
+            assert!(
+                owned_count >= 3,
+                "Player {} should have at least 3 territory tiles, got {}",
+                player.id,
+                owned_count
+            );
+            assert!(
+                owned_count <= 5,
+                "Player {} should have at most 5 territory tiles, got {}",
+                player.id,
+                owned_count
+            );
+
+            // Verify adjacent tiles are owned (not blocked by mountains)
+            let mut adjacent_owned = 0;
+            for adj in player.capital.adjacent(map.width(), map.height()) {
+                if let Some(tile) = map.get(adj) {
+                    if tile.owner == Some(player.id) {
+                        adjacent_owned += 1;
+                    }
+                }
+            }
+            assert!(
+                adjacent_owned >= 2,
+                "Player {} should have at least 2 adjacent owned tiles, got {}",
+                player.id,
+                adjacent_owned
+            );
+        }
+    }
+
+    #[test]
+    fn test_starting_economy_sustainable() {
+        use crate::game::calculate_food_balance;
+
+        let (map, players) = generate_map(42, 64, 64, 2).unwrap();
+
+        for player in &players {
+            let balance = calculate_food_balance(&map, player.id);
+
+            // Starting balance should be positive (sustainable)
+            assert!(
+                balance.balance >= 0,
+                "Player {} should have non-negative food balance, got {}",
+                player.id,
+                balance.balance
+            );
+
+            // Should have at least 3 territory tiles
+            assert!(
+                balance.territory >= 3,
+                "Player {} should have at least 3 territory, got {}",
+                player.id,
+                balance.territory
+            );
         }
     }
 }

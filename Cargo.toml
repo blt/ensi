@@ -50,6 +50,7 @@ missing_copy_implementations = "deny"
 missing_debug_implementations = "deny"
 missing_docs = "deny"
 warnings = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [profile.release]
 lto = true

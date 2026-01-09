@@ -17,11 +17,14 @@ pub use mapgen::{generate_map, MapGenError};
 
 use crate::game::{
     process_attack, Command, GameState, GameSyscallHandler, PlayerId, TileType,
+    MAX_COMMANDS_PER_TURN,
 };
 use crate::vm::{Cpu, Memory};
 use crate::{MeteringConfig, TurnResult, Vm};
 use rayon::prelude::*;
-use std::sync::{Arc, RwLock};
+
+/// Maximum number of players in a tournament.
+pub const MAX_PLAYERS: usize = 8;
 
 /// A player program as raw bytes.
 #[derive(Debug, Clone)]
@@ -174,19 +177,28 @@ impl PlayerVm {
 }
 
 /// Collected commands from a single player's turn.
+/// Uses fixed-size array to avoid heap allocations.
+#[derive(Clone, Copy)]
 struct TurnCommands {
     /// Player identifier.
     player_id: PlayerId,
-    /// Commands issued this turn.
-    commands: Vec<Command>,
+    /// Commands issued this turn (fixed array, no heap).
+    commands: [Command; MAX_COMMANDS_PER_TURN],
+    /// Number of valid commands.
+    command_count: u16,
     /// Whether the player yielded.
     #[allow(dead_code)]
     yielded: bool,
-    /// Instructions executed this turn.
-    #[allow(dead_code)]
-    instructions_executed: u64,
     /// Whether a trap occurred.
     trapped: bool,
+}
+
+impl TurnCommands {
+    /// Get the commands as a slice.
+    #[inline]
+    fn commands(&self) -> &[Command] {
+        &self.commands[..self.command_count as usize]
+    }
 }
 
 /// Run a complete game with the given seed and player programs.
@@ -316,8 +328,9 @@ impl GameRunner {
 
     /// Execute all player VMs and collect commands.
     fn execute_vms(&mut self) -> Vec<TurnCommands> {
-        let game_state_arc = Arc::new(RwLock::new(self.game_state.clone()));
         let turn_budget = self.config.turn_budget;
+        // Immutable reference to game state - shared across all parallel VMs (no clone!)
+        let game_state = &self.game_state;
 
         // Collect indices of alive players
         let alive_indices: Vec<usize> = self
@@ -335,9 +348,8 @@ impl GameRunner {
                 let vm = &self.player_vms[idx];
                 let player_id = vm.player_id;
 
-                // Create syscall handler with shared game state
-                let handler =
-                    GameSyscallHandler::new(player_id, Arc::clone(&game_state_arc));
+                // Create syscall handler with immutable reference to game state (no lock!)
+                let handler = GameSyscallHandler::new(player_id, game_state);
 
                 // Create temporary VM
                 let mut temp_vm = Vm::from_parts(
@@ -355,16 +367,20 @@ impl GameRunner {
                 let instructions = temp_vm.total_executed();
                 let cpu = temp_vm.cpu.clone();
                 let memory = temp_vm.memory.clone();
-                let yielded = temp_vm.handler_ref().has_yielded();
+                let handler = temp_vm.handler_ref();
+                let yielded = handler.has_yielded();
+                let command_count = handler.command_count();
 
-                // Now take the handler and extract commands
-                let commands = temp_vm.take_handler().take_commands();
+                // Copy commands directly from handler's fixed array (no heap allocation)
+                let mut commands = [Command::Yield; MAX_COMMANDS_PER_TURN];
+                let src_commands = handler.commands();
+                commands[..src_commands.len()].copy_from_slice(src_commands);
 
                 let turn_commands = TurnCommands {
                     player_id,
                     commands,
+                    command_count,
                     yielded,
-                    instructions_executed: instructions,
                     trapped,
                 };
 
@@ -395,7 +411,7 @@ impl GameRunner {
         turn_commands.sort_by_key(|tc| tc.player_id);
 
         for tc in turn_commands {
-            for command in tc.commands {
+            for &command in tc.commands() {
                 self.apply_command(tc.player_id, command);
             }
         }
@@ -405,7 +421,7 @@ impl GameRunner {
     fn apply_command(&mut self, player_id: PlayerId, command: Command) {
         match command {
             Command::Move { from, to, count } => {
-                // Verify source tile and remove army
+                // Verify source tile has enough army to move
                 let can_move = self
                     .game_state
                     .map
@@ -413,10 +429,7 @@ impl GameRunner {
                     .map_or(false, |t| t.owner == Some(player_id) && t.army >= count);
 
                 if can_move {
-                    if let Some(from_tile) = self.game_state.map.get_mut(from) {
-                        from_tile.army -= count;
-                    }
-                    // Process attack/move to destination
+                    // process_attack handles deducting from source and combat resolution
                     process_attack(&mut self.game_state.map, from, to, count);
                 }
             }

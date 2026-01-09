@@ -1,0 +1,1 @@
+{"rustc":5308384850447674664,"features":"[]","declared_features":"[]","target":10353004457644949388,"profile":2241668132362809309,"path":7247002709367845855,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"debug/.fingerprint/cassowary-401e6a2f9cb4979a/dep-lib-cassowary","checksum":false}}],"rustflags":["-C","link-arg=-fuse-ld=lld"],"config":2069994364910194474,"compile_kind":0}

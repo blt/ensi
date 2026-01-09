@@ -1,0 +1,37 @@
+[package]
+name = "ensi-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.ensi]
+path = ".."
+
+[[bin]]
+name = "fuzz_economy"
+path = "fuzz_targets/fuzz_economy.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_combat"
+path = "fuzz_targets/fuzz_combat.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_game_turn"
+path = "fuzz_targets/fuzz_game_turn.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1

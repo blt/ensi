@@ -26,7 +26,6 @@ use crate::vm::{Cpu, Memory};
 use crate::game::{process_attack, Command, GameSyscallHandler, TileType};
 use crate::{MeteringConfig, Vm};
 use rayon::prelude::*;
-use std::sync::{Arc, RwLock};
 use std::io::{self, Read as IoRead, Write as IoWrite};
 use std::path::Path;
 use std::fs::File;
@@ -457,8 +456,9 @@ impl ReplayEngine {
 
     /// Execute all player VMs and collect commands.
     fn execute_vms(&mut self) -> Vec<(PlayerId, Vec<Command>)> {
-        let game_state_arc = Arc::new(RwLock::new(self.game_state.clone()));
         let turn_budget = self.recording.config.turn_budget;
+        // Immutable reference to game state - shared across all parallel VMs (no clone!)
+        let game_state = &self.game_state;
 
         // Collect indices of alive players
         let alive_indices: Vec<usize> = self
@@ -476,8 +476,8 @@ impl ReplayEngine {
                 let vm = &self.player_vms[idx];
                 let player_id = vm.player_id;
 
-                // Create syscall handler
-                let handler = GameSyscallHandler::new(player_id, Arc::clone(&game_state_arc));
+                // Create syscall handler with immutable reference (no lock!)
+                let handler = GameSyscallHandler::new(player_id, game_state);
 
                 // Create temporary VM
                 let mut temp_vm = Vm::from_parts(
@@ -493,7 +493,8 @@ impl ReplayEngine {
                 // Extract state
                 let cpu = temp_vm.cpu.clone();
                 let memory = temp_vm.memory.clone();
-                let commands = temp_vm.take_handler().take_commands();
+                // Replay is not hot path - OK to allocate here for simplicity
+                let commands = temp_vm.handler_ref().commands().to_vec();
 
                 (idx, player_id, commands, cpu, memory)
             })
@@ -534,9 +535,7 @@ impl ReplayEngine {
                     .map_or(false, |t| t.owner == Some(player_id) && t.army >= count);
 
                 if can_move {
-                    if let Some(from_tile) = self.game_state.map.get_mut(from) {
-                        from_tile.army -= count;
-                    }
+                    // process_attack handles deducting from source and combat resolution
                     process_attack(&mut self.game_state.map, from, to, count);
                 }
             }

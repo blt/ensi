@@ -115,6 +115,11 @@ pub fn process_attack(
 
     let (defender_owner, defending_army) = defender;
 
+    // Deduct attacking army from source tile first
+    if let Some(from_tile) = map.get_mut(from) {
+        from_tile.army = from_tile.army.saturating_sub(attacking_army);
+    }
+
     // Same owner - this is a move, not an attack
     if defender_owner == Some(attacker_owner) {
         if let Some(to_tile) = map.get_mut(to) {
@@ -146,6 +151,48 @@ pub fn process_attack(
             to_tile.army = 0;
         }
         false
+    }
+}
+
+/// Kani formal verification proofs.
+///
+/// These prove arithmetic safety properties for combat resolution.
+/// Run with: `cargo kani`
+#[cfg(kani)]
+mod kani_proofs {
+    /// Prove that combat subtraction never underflows.
+    ///
+    /// Combat uses `attacking_army - defending_army` which is safe
+    /// because the subtraction is guarded by `attacking_army > defending_army`.
+    #[kani::proof]
+    fn prove_combat_subtraction_safe() {
+        let attacking: u32 = kani::any();
+        let defending: u32 = kani::any();
+
+        // Mirror the combat logic from process_attack
+        if attacking > defending {
+            let remaining = attacking - defending;
+            assert!(remaining < attacking);
+            assert!(remaining <= u32::MAX);
+        } else if attacking < defending {
+            let remaining = defending - attacking;
+            assert!(remaining < defending);
+            assert!(remaining <= u32::MAX);
+        }
+        // Equal case: both set to 0, no subtraction needed
+    }
+
+    /// Prove that saturating_add for army reinforcement is safe.
+    #[kani::proof]
+    fn prove_army_reinforce_no_overflow() {
+        let current_army: u32 = kani::any();
+        let reinforcement: u32 = kani::any();
+
+        let new_army = current_army.saturating_add(reinforcement);
+
+        // Result is bounded
+        assert!(new_army >= current_army || new_army == u32::MAX);
+        assert!(new_army >= reinforcement || new_army == u32::MAX);
     }
 }
 

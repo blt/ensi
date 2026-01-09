@@ -2,5 +2,59 @@
 name = "ensi"
 version = "0.1.0"
 edition = "2024"
+description = "A deterministic RISC-V VM for programming games"
+license = "MIT"
 
 [dependencies]
+
+[dev-dependencies]
+proptest = "1.9"
+criterion = { version = "0.6", features = ["html_reports"] }
+rrs-lib = "0.1"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
+perf = "deny"
+suspicious = "deny"
+complexity = "deny"
+unwrap_used = "deny"
+mod_module_files = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+redundant_allocation = "deny"
+rc_buffer = "deny"
+large_futures = "deny"
+large_stack_arrays = "deny"
+float_cmp = "deny"
+manual_memcpy = "deny"
+unnecessary_to_owned = "deny"
+
+[lints.rust]
+unused_extern_crates = "deny"
+unused_allocation = "deny"
+unused_assignments = "deny"
+unused_comparisons = "deny"
+unreachable_pub = "deny"
+missing_copy_implementations = "deny"
+missing_debug_implementations = "deny"
+missing_docs = "deny"
+warnings = "deny"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+debug = 2
+split-debuginfo = "unpacked"
+
+[profile.dev]
+panic = "abort"
+debug = 2
+split-debuginfo = "unpacked"
+
+[[bench]]
+name = "vm_benchmark"
+harness = false

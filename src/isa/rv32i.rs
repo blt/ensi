@@ -26,7 +26,7 @@ use crate::vm::memory::Memory;
 /// memory fault, or invalid instruction).
 #[inline]
 #[allow(clippy::too_many_lines)]
-pub fn execute_rv32i(
+pub(crate) fn execute_rv32i(
     inst: Instruction,
     cpu: &mut Cpu,
     memory: &mut Memory,

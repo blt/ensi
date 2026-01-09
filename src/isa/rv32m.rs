@@ -19,8 +19,14 @@ use crate::vm::cpu::Cpu;
 /// # Errors
 ///
 /// Returns [`TrapCause::InvalidInstruction`] if the instruction is not an M extension opcode.
+///
+/// # Division by Zero and Overflow
+///
+/// Per RISC-V specification:
+/// - Division by zero: quotient = all 1s (-1/MAX), remainder = dividend
+/// - Signed overflow (MIN / -1): quotient = MIN, remainder = 0
 #[inline]
-pub fn execute_rv32m(inst: Instruction, cpu: &mut Cpu, pc: u32) -> VmResult<u32> {
+pub(crate) fn execute_rv32m(inst: Instruction, cpu: &mut Cpu, pc: u32) -> VmResult<u32> {
     let next_pc = pc.wrapping_add(4);
 
     match inst {

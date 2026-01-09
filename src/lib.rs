@@ -149,17 +149,15 @@ pub enum StepResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnResult {
     /// Turn completed because budget was exhausted.
+    ///
+    /// The `remaining` field contains any leftover budget that was insufficient
+    /// to execute the next instruction.
     BudgetExhausted {
         /// Instructions remaining (less than cost of next instruction).
         remaining: u32,
     },
-    /// Turn completed because of a trap.
+    /// Turn completed because of a trap (ecall, ebreak, memory fault, etc.).
     Trap(TrapCause),
-    /// Player yielded early.
-    Yielded {
-        /// Budget remaining when yielded.
-        remaining: u32,
-    },
 }
 
 /// The RISC-V virtual machine.
@@ -217,7 +215,9 @@ impl<H: SyscallHandler> Vm<H> {
 
     /// Execute a single instruction step.
     ///
-    /// Returns the step result and does not automatically advance PC on trap.
+    /// Returns [`StepResult::Ok`] with the instruction cost on success, advancing
+    /// the PC to the next instruction. Returns [`StepResult::Trap`] on any trap
+    /// condition (ecall, ebreak, memory fault, etc.) without advancing the PC.
     pub fn step(&mut self) -> StepResult {
         // Check PC alignment
         if !self.cpu.pc.is_multiple_of(4) {
@@ -253,6 +253,7 @@ impl<H: SyscallHandler> Vm<H> {
     }
 
     /// Execute an instruction, returning the next PC.
+    #[inline]
     fn execute_instruction(&mut self, inst: Instruction) -> VmResult<u32> {
         let pc = self.cpu.pc;
 
@@ -304,11 +305,6 @@ impl<H: SyscallHandler> Vm<H> {
             // Execute
             let next_pc = match self.execute_instruction(inst) {
                 Ok(pc) => pc,
-                Err(TrapCause::Ecall) => {
-                    // Ecall was handled by handler, check if it wants to yield
-                    // For now, continue execution
-                    self.cpu.pc.wrapping_add(4)
-                }
                 Err(cause) => return TurnResult::Trap(cause),
             };
 

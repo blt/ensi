@@ -45,6 +45,7 @@ impl Memory {
     }
 
     /// Check if an address range is valid for the given access type.
+    #[inline]
     fn check_bounds(&self, addr: u32, len: u32, access: AccessType) -> VmResult<usize> {
         if addr < self.base {
             return Err(TrapCause::MemoryFault { addr, access });
@@ -65,6 +66,7 @@ impl Memory {
     /// # Errors
     ///
     /// Returns [`TrapCause::MemoryFault`] if the address is out of bounds.
+    #[inline]
     pub fn load_u8(&self, addr: u32) -> VmResult<u8> {
         let offset = self.check_bounds(addr, 1, AccessType::Read)?;
         Ok(self.data[offset])
@@ -75,6 +77,7 @@ impl Memory {
     /// # Errors
     ///
     /// Returns [`TrapCause::MemoryFault`] if the address is out of bounds.
+    #[inline]
     pub fn load_u16(&self, addr: u32) -> VmResult<u16> {
         let offset = self.check_bounds(addr, 2, AccessType::Read)?;
         Ok(u16::from_le_bytes([
@@ -88,14 +91,13 @@ impl Memory {
     /// # Errors
     ///
     /// Returns [`TrapCause::MemoryFault`] if the address is out of bounds.
+    #[inline]
     pub fn load_u32(&self, addr: u32) -> VmResult<u32> {
         let offset = self.check_bounds(addr, 4, AccessType::Read)?;
-        Ok(u32::from_le_bytes([
-            self.data[offset],
-            self.data[offset + 1],
-            self.data[offset + 2],
-            self.data[offset + 3],
-        ]))
+        // Bounds are verified, so indexing is safe. Copy to array for from_le_bytes.
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&self.data[offset..offset + 4]);
+        Ok(u32::from_le_bytes(bytes))
     }
 
     /// Store a byte (8-bit) to memory.
@@ -103,6 +105,7 @@ impl Memory {
     /// # Errors
     ///
     /// Returns [`TrapCause::MemoryFault`] if the address is out of bounds.
+    #[inline]
     pub fn store_u8(&mut self, addr: u32, value: u8) -> VmResult<()> {
         let offset = self.check_bounds(addr, 1, AccessType::Write)?;
         self.data[offset] = value;
@@ -114,11 +117,10 @@ impl Memory {
     /// # Errors
     ///
     /// Returns [`TrapCause::MemoryFault`] if the address is out of bounds.
+    #[inline]
     pub fn store_u16(&mut self, addr: u32, value: u16) -> VmResult<()> {
         let offset = self.check_bounds(addr, 2, AccessType::Write)?;
-        let bytes = value.to_le_bytes();
-        self.data[offset] = bytes[0];
-        self.data[offset + 1] = bytes[1];
+        self.data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
         Ok(())
     }
 
@@ -127,29 +129,27 @@ impl Memory {
     /// # Errors
     ///
     /// Returns [`TrapCause::MemoryFault`] if the address is out of bounds.
+    #[inline]
     pub fn store_u32(&mut self, addr: u32, value: u32) -> VmResult<()> {
         let offset = self.check_bounds(addr, 4, AccessType::Write)?;
-        let bytes = value.to_le_bytes();
-        self.data[offset] = bytes[0];
-        self.data[offset + 1] = bytes[1];
-        self.data[offset + 2] = bytes[2];
-        self.data[offset + 3] = bytes[3];
+        self.data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         Ok(())
     }
 
-    /// Fetch an instruction from memory (same as `load_u32` but uses Execute access type).
+    /// Fetch an instruction from memory.
+    ///
+    /// Identical to `load_u32` but uses [`AccessType::Execute`] for error reporting,
+    /// which allows distinguishing instruction fetch faults from data load faults.
     ///
     /// # Errors
     ///
     /// Returns [`TrapCause::MemoryFault`] if the address is out of bounds.
+    #[inline]
     pub fn fetch(&self, addr: u32) -> VmResult<u32> {
         let offset = self.check_bounds(addr, 4, AccessType::Execute)?;
-        Ok(u32::from_le_bytes([
-            self.data[offset],
-            self.data[offset + 1],
-            self.data[offset + 2],
-            self.data[offset + 3],
-        ]))
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&self.data[offset..offset + 4]);
+        Ok(u32::from_le_bytes(bytes))
     }
 
     /// Load a slice of bytes from memory (for bulk operations).
@@ -157,6 +157,7 @@ impl Memory {
     /// # Errors
     ///
     /// Returns [`TrapCause::MemoryFault`] if the address range is out of bounds.
+    #[inline]
     pub fn load_bytes(&self, addr: u32, len: u32) -> VmResult<&[u8]> {
         let offset = self.check_bounds(addr, len, AccessType::Read)?;
         Ok(&self.data[offset..offset + len as usize])
@@ -167,6 +168,7 @@ impl Memory {
     /// # Errors
     ///
     /// Returns [`TrapCause::MemoryFault`] if the address range is out of bounds.
+    #[inline]
     #[allow(clippy::cast_possible_truncation)]
     pub fn store_bytes(&mut self, addr: u32, bytes: &[u8]) -> VmResult<()> {
         let offset = self.check_bounds(addr, bytes.len() as u32, AccessType::Write)?;

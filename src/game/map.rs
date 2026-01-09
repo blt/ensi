@@ -20,25 +20,32 @@ impl Coord {
 
     /// Get adjacent coordinates (up, down, left, right).
     ///
-    /// Returns only valid coordinates within the given bounds.
+    /// Returns a fixed-size array and count to avoid heap allocation.
+    /// The array contains valid coordinates in indices 0..count.
     #[must_use]
-    pub fn adjacent(&self, width: u16, height: u16) -> Vec<Coord> {
-        let mut result = Vec::with_capacity(4);
+    #[inline]
+    pub fn adjacent(&self, width: u16, height: u16) -> ([Coord; 4], u8) {
+        let mut result = [Coord::new(0, 0); 4];
+        let mut count = 0u8;
 
         if self.y > 0 {
-            result.push(Coord::new(self.x, self.y - 1)); // up
+            result[count as usize] = Coord::new(self.x, self.y - 1); // up
+            count += 1;
         }
         if self.y + 1 < height {
-            result.push(Coord::new(self.x, self.y + 1)); // down
+            result[count as usize] = Coord::new(self.x, self.y + 1); // down
+            count += 1;
         }
         if self.x > 0 {
-            result.push(Coord::new(self.x - 1, self.y)); // left
+            result[count as usize] = Coord::new(self.x - 1, self.y); // left
+            count += 1;
         }
         if self.x + 1 < width {
-            result.push(Coord::new(self.x + 1, self.y)); // right
+            result[count as usize] = Coord::new(self.x + 1, self.y); // right
+            count += 1;
         }
 
-        result
+        (result, count)
     }
 }
 
@@ -267,21 +274,23 @@ mod tests {
     #[test]
     fn test_coord_adjacent() {
         let coord = Coord::new(5, 5);
-        let adj = coord.adjacent(10, 10);
-        assert_eq!(adj.len(), 4);
-        assert!(adj.contains(&Coord::new(5, 4))); // up
-        assert!(adj.contains(&Coord::new(5, 6))); // down
-        assert!(adj.contains(&Coord::new(4, 5))); // left
-        assert!(adj.contains(&Coord::new(6, 5))); // right
+        let (adj, count) = coord.adjacent(10, 10);
+        let adj_slice = &adj[..count as usize];
+        assert_eq!(count, 4);
+        assert!(adj_slice.contains(&Coord::new(5, 4))); // up
+        assert!(adj_slice.contains(&Coord::new(5, 6))); // down
+        assert!(adj_slice.contains(&Coord::new(4, 5))); // left
+        assert!(adj_slice.contains(&Coord::new(6, 5))); // right
     }
 
     #[test]
     fn test_coord_adjacent_corner() {
         let coord = Coord::new(0, 0);
-        let adj = coord.adjacent(10, 10);
-        assert_eq!(adj.len(), 2);
-        assert!(adj.contains(&Coord::new(0, 1))); // down
-        assert!(adj.contains(&Coord::new(1, 0))); // right
+        let (adj, count) = coord.adjacent(10, 10);
+        let adj_slice = &adj[..count as usize];
+        assert_eq!(count, 2);
+        assert!(adj_slice.contains(&Coord::new(0, 1))); // down
+        assert!(adj_slice.contains(&Coord::new(1, 0))); // right
     }
 
     #[test]

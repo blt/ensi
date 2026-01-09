@@ -130,8 +130,9 @@ fn find_contested_areas(state: &GameState) -> Vec<Coord> {
                 if tile.army > 0 {
                     if let Some(owner) = tile.owner {
                         // Check if any adjacent tile has a different owner's army
-                        for adj in coord.adjacent(width, height) {
-                            if let Some(adj_tile) = state.map.get(adj) {
+                        let (adjacent, adj_count) = coord.adjacent(width, height);
+                        for adj in &adjacent[..adj_count as usize] {
+                            if let Some(adj_tile) = state.map.get(*adj) {
                                 if adj_tile.army > 0 && adj_tile.owner != Some(owner) {
                                     contested.push(coord);
                                     break;

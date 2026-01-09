@@ -200,8 +200,8 @@ fn apply_command(game_state: &mut GameState, player_id: u8, cmd: &FuzzCommand) {
                 });
 
             // Check adjacency
-            let adjacent = from.adjacent(16, 16);
-            let is_adjacent = adjacent.contains(&to);
+            let (adjacent, adj_count) = from.adjacent(16, 16);
+            let is_adjacent = adjacent[..adj_count as usize].contains(&to);
 
             // Check destination is passable
             let passable = game_state

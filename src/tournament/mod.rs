@@ -332,46 +332,47 @@ impl GameRunner {
         // Immutable reference to game state - shared across all parallel VMs (no clone!)
         let game_state = &self.game_state;
 
-        // Collect indices of alive players
-        let alive_indices: Vec<usize> = self
+        // PHASE 1: Take ownership of CPU/Memory from alive players (sequential)
+        // This avoids cloning 1MB Memory per player per turn!
+        let owned_states: Vec<(usize, PlayerId, Cpu, Memory)> = self
             .player_vms
-            .iter()
+            .iter_mut()
             .enumerate()
             .filter(|(_, vm)| !vm.eliminated)
-            .map(|(i, _)| i)
+            .map(|(idx, vm)| {
+                // Take ownership - replace with empty placeholder
+                let cpu = std::mem::take(&mut vm.cpu);
+                let base = vm.memory.base();
+                let memory = std::mem::replace(&mut vm.memory, Memory::new(0, base));
+                (idx, vm.player_id, cpu, memory)
+            })
             .collect();
 
-        // Execute VMs in parallel
-        let results: Vec<(usize, TurnCommands, Cpu, Memory, u64)> = alive_indices
+        // PHASE 2: Execute VMs in parallel (owned data, no cloning!)
+        let results: Vec<(usize, TurnCommands, Cpu, Memory, u64)> = owned_states
             .into_par_iter()
-            .map(|idx| {
-                let vm = &self.player_vms[idx];
-                let player_id = vm.player_id;
-
+            .map(|(idx, player_id, cpu, memory)| {
                 // Create syscall handler with immutable reference to game state (no lock!)
                 let handler = GameSyscallHandler::new(player_id, game_state);
 
-                // Create temporary VM
+                // Create VM with owned (not cloned!) components
                 let mut temp_vm = Vm::from_parts(
-                    vm.cpu.clone(),
-                    vm.memory.clone(),
+                    cpu,
+                    memory,
                     handler,
                     MeteringConfig::default(),
                 );
 
                 // Execute turn
                 let turn_result = temp_vm.run_turn(turn_budget);
-
-                // Extract state before taking handler (which consumes the VM)
                 let trapped = matches!(turn_result, TurnResult::Trap(_));
-                let instructions = temp_vm.total_executed();
-                let cpu = temp_vm.cpu.clone();
-                let memory = temp_vm.memory.clone();
-                let handler = temp_vm.handler_ref();
+
+                // Decompose VM to get parts back without cloning
+                let (cpu, memory, handler, instructions) = temp_vm.into_parts();
+
+                // Extract command data from handler
                 let yielded = handler.has_yielded();
                 let command_count = handler.command_count();
-
-                // Copy commands directly from handler's fixed array (no heap allocation)
                 let mut commands = [Command::Yield; MAX_COMMANDS_PER_TURN];
                 let src_commands = handler.commands();
                 commands[..src_commands.len()].copy_from_slice(src_commands);
@@ -384,12 +385,11 @@ impl GameRunner {
                     trapped,
                 };
 
-                // Return data needed to update PlayerVm
                 (idx, turn_commands, cpu, memory, instructions)
             })
             .collect();
 
-        // Update player VM states (sequential)
+        // PHASE 3: Write back CPU/Memory states (sequential)
         let mut turn_commands_vec = Vec::with_capacity(results.len());
         for (idx, turn_commands, cpu, memory, instructions) in results {
             let vm = &mut self.player_vms[idx];

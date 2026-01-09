@@ -247,6 +247,15 @@ impl<H: SyscallHandler> Vm<H> {
         self.handler
     }
 
+    /// Decompose the VM into its parts, consuming it.
+    ///
+    /// Returns (cpu, memory, handler, total_executed).
+    /// This allows extracting components without cloning.
+    #[must_use]
+    pub fn into_parts(self) -> (Cpu, Memory, H, u64) {
+        (self.cpu, self.memory, self.handler, self.total_executed)
+    }
+
     /// Execute a single instruction step.
     ///
     /// Returns [`StepResult::Ok`] with the instruction cost on success, advancing

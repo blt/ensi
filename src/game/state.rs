@@ -117,8 +117,9 @@ impl GameState {
         }
 
         // Check if player owns any adjacent tile
-        for adj in coord.adjacent(self.map.width(), self.map.height()) {
-            if let Some(tile) = self.map.get(adj) {
+        let (adjacent, count) = coord.adjacent(self.map.width(), self.map.height());
+        for adj in &adjacent[..count as usize] {
+            if let Some(tile) = self.map.get(*adj) {
                 if tile.owner == Some(player_id) {
                     return true;
                 }

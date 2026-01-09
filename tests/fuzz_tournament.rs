@@ -62,27 +62,28 @@ proptest! {
         for x in 0..w.min(10) {
             for y in 0..h.min(10) {
                 let coord = Coord::new(x, y);
-                let adjacent = coord.adjacent(w, h);
+                let (adjacent, count) = coord.adjacent(w, h);
+                let adj_slice = &adjacent[..count as usize];
 
                 // Should have 0-4 neighbors
-                prop_assert!(adjacent.len() <= 4);
+                prop_assert!(count <= 4);
 
                 // All neighbors should be within bounds
-                for adj in &adjacent {
+                for adj in adj_slice {
                     prop_assert!(adj.x < w, "adj.x={} >= w={}", adj.x, w);
                     prop_assert!(adj.y < h, "adj.y={} >= h={}", adj.y, h);
                 }
 
                 // Should have correct count based on position
                 let expected_count = {
-                    let mut count = 0;
-                    if x > 0 { count += 1; }
-                    if y > 0 { count += 1; }
-                    if x + 1 < w { count += 1; }
-                    if y + 1 < h { count += 1; }
-                    count
+                    let mut c = 0u8;
+                    if x > 0 { c += 1; }
+                    if y > 0 { c += 1; }
+                    if x + 1 < w { c += 1; }
+                    if y + 1 < h { c += 1; }
+                    c
                 };
-                prop_assert_eq!(adjacent.len(), expected_count);
+                prop_assert_eq!(count, expected_count);
             }
         }
     }

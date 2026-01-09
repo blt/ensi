@@ -336,8 +336,9 @@ impl<'a> GameSyscallHandler<'a> {
         }
 
         // Check destination is adjacent
-        let adjacent = from.adjacent(self.game_state.map.width(), self.game_state.map.height());
-        if !adjacent.contains(&to) {
+        let (adjacent, adj_count) = from.adjacent(self.game_state.map.width(), self.game_state.map.height());
+        let is_adjacent = adjacent[..adj_count as usize].contains(&to);
+        if !is_adjacent {
             return false;
         }
 

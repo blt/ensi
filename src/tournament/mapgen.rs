@@ -263,13 +263,14 @@ fn create_players(map: &mut Map, starting_positions: &[Coord]) -> Vec<Player> {
 
         // Give player starting territory (4 adjacent tiles)
         // This ensures positive food balance from turn 0
-        for adj in coord.adjacent(width, height) {
-            if let Some(tile) = map.get(adj) {
+        let (adjacent, adj_count) = coord.adjacent(width, height);
+        for adj in &adjacent[..adj_count as usize] {
+            if let Some(tile) = map.get(*adj) {
                 // Only claim passable tiles that aren't already cities
                 if tile.tile_type.is_passable() && tile.tile_type != TileType::City {
                     let mut territory = Tile::desert();
                     territory.owner = Some(player_id);
-                    map.set(adj, territory);
+                    map.set(*adj, territory);
                 }
             }
         }
@@ -419,8 +420,9 @@ mod tests {
 
             // Verify adjacent tiles are owned (not blocked by mountains)
             let mut adjacent_owned = 0;
-            for adj in player.capital.adjacent(map.width(), map.height()) {
-                if let Some(tile) = map.get(adj) {
+            let (adjacent, adj_count) = player.capital.adjacent(map.width(), map.height());
+            for adj in &adjacent[..adj_count as usize] {
+                if let Some(tile) = map.get(*adj) {
                     if tile.owner == Some(player.id) {
                         adjacent_owned += 1;
                     }

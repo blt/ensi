@@ -24,12 +24,18 @@
 //! ```
 
 pub mod error;
+pub mod game;
 pub mod isa;
 pub mod vm;
 
 pub use error::{AccessType, TrapCause, VmResult};
 pub use isa::Instruction;
 pub use vm::{Cpu, Memory};
+
+// Re-export key game types at crate root for convenience
+pub use game::{
+    Command, Coord, GameState, GameSyscallHandler, Map, Player, PlayerId, Tile, TileType,
+};
 
 use isa::{decode, execute_rv32i, execute_rv32m};
 

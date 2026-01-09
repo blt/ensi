@@ -1,0 +1,381 @@
+//! Game state management.
+
+use crate::game::{
+    apply_economy, calculate_food_balance, resolve_combat, Coord, FoodBalance, Map, Player,
+    PlayerId, TileType,
+};
+
+/// Scoring weights for final score calculation.
+#[derive(Debug, Clone, Copy)]
+pub struct ScoringWeights {
+    /// Points per population (default: 1.0).
+    pub population: f64,
+    /// Points per city owned (default: 10.0).
+    pub city: f64,
+    /// Points per territory tile owned (default: 0.5).
+    pub territory: f64,
+}
+
+impl Default for ScoringWeights {
+    fn default() -> Self {
+        Self {
+            population: 1.0,
+            city: 10.0,
+            territory: 0.5,
+        }
+    }
+}
+
+/// Complete game state.
+#[derive(Debug, Clone)]
+pub struct GameState {
+    /// The game map.
+    pub map: Map,
+    /// All players in the game.
+    pub players: Vec<Player>,
+    /// Current turn number (0-indexed).
+    pub turn: u32,
+    /// Maximum number of turns before game ends.
+    pub max_turns: u32,
+    /// Scoring weights for final score calculation.
+    pub scoring: ScoringWeights,
+}
+
+impl GameState {
+    /// Create a new game state with the given map and players.
+    ///
+    /// Players should already have their capitals set and the map should
+    /// have the starting cities configured.
+    #[must_use]
+    pub fn new(map: Map, players: Vec<Player>, max_turns: u32) -> Self {
+        Self {
+            map,
+            players,
+            turn: 0,
+            max_turns,
+            scoring: ScoringWeights::default(),
+        }
+    }
+
+    /// Get the current turn number.
+    #[must_use]
+    pub const fn turn(&self) -> u32 {
+        self.turn
+    }
+
+    /// Check if the game is over.
+    #[must_use]
+    pub fn is_game_over(&self) -> bool {
+        // Game ends if turn limit reached
+        if self.turn >= self.max_turns {
+            return true;
+        }
+
+        // Game ends if only one player (or zero) remains alive
+        let alive_count = self.players.iter().filter(|p| p.alive).count();
+        alive_count <= 1
+    }
+
+    /// Get a player by ID.
+    #[must_use]
+    pub fn get_player(&self, id: PlayerId) -> Option<&Player> {
+        self.players.iter().find(|p| p.id == id)
+    }
+
+    /// Get a mutable reference to a player by ID.
+    #[must_use]
+    pub fn get_player_mut(&mut self, id: PlayerId) -> Option<&mut Player> {
+        self.players.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Calculate the score for a player.
+    #[must_use]
+    pub fn calculate_score(&self, player_id: PlayerId) -> f64 {
+        let population = self.map.total_population(player_id) as f64;
+        let cities = self.map.count_cities(player_id) as f64;
+        let territory = self.map.count_territory(player_id) as f64;
+
+        population * self.scoring.population
+            + cities * self.scoring.city
+            + territory * self.scoring.territory
+    }
+
+    /// Get the food balance for a player.
+    #[must_use]
+    pub fn food_balance(&self, player_id: PlayerId) -> FoodBalance {
+        calculate_food_balance(&self.map, player_id)
+    }
+
+    /// Check if a player can see a tile (fog of war).
+    #[must_use]
+    pub fn can_see_tile(&self, player_id: PlayerId, coord: Coord) -> bool {
+        // Check if player owns this tile
+        if let Some(tile) = self.map.get(coord) {
+            if tile.owner == Some(player_id) {
+                return true;
+            }
+        }
+
+        // Check if player owns any adjacent tile
+        for adj in coord.adjacent(self.map.width(), self.map.height()) {
+            if let Some(tile) = self.map.get(adj) {
+                if tile.owner == Some(player_id) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Update visibility for a player (mark tiles as discovered).
+    pub fn update_visibility(&mut self, player_id: PlayerId) {
+        let width = self.map.width();
+        let height = self.map.height();
+
+        // Collect visible tiles
+        let visible: Vec<Coord> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| Coord::new(x, y)))
+            .filter(|&coord| self.can_see_tile(player_id, coord))
+            .collect();
+
+        // Mark as discovered
+        if let Some(player) = self.get_player_mut(player_id) {
+            for coord in visible {
+                player.discover(coord);
+            }
+        }
+    }
+
+    /// Process economy phase for all players.
+    pub fn process_economy(&mut self) {
+        let rng_base = u64::from(self.turn) * 1_000_000;
+
+        for player in &self.players {
+            if !player.alive {
+                continue;
+            }
+
+            let player_id = player.id;
+            let rng_seed = rng_base + u64::from(player_id);
+            let _result = apply_economy(&mut self.map, player_id, rng_seed);
+        }
+    }
+
+    /// Check for eliminated players (capital captured or zero population).
+    pub fn check_eliminations(&mut self) {
+        for player in &mut self.players {
+            if !player.alive {
+                continue;
+            }
+
+            // Check if capital is still owned
+            let capital_owned = self
+                .map
+                .get(player.capital)
+                .map_or(false, |tile| tile.owner == Some(player.id));
+
+            // Check if player has any population
+            let total_pop = self.map.total_population(player.id);
+
+            if !capital_owned || total_pop == 0 {
+                player.eliminate();
+            }
+        }
+    }
+
+    /// Process combat on all tiles.
+    pub fn process_combat(&mut self) {
+        resolve_combat(&mut self.map);
+    }
+
+    /// Advance to the next turn.
+    pub fn advance_turn(&mut self) {
+        self.turn += 1;
+    }
+
+    /// Get all alive players.
+    pub fn alive_players(&self) -> impl Iterator<Item = &Player> {
+        self.players.iter().filter(|p| p.alive)
+    }
+
+    /// Try to move a player's capital to a new city.
+    ///
+    /// Returns `true` if successful, `false` if the move is invalid.
+    pub fn try_move_capital(&mut self, player_id: PlayerId, new_capital: Coord) -> bool {
+        // Get current capital population
+        let current_pop = {
+            let Some(player) = self.get_player(player_id) else {
+                return false;
+            };
+            let Some(tile) = self.map.get(player.capital) else {
+                return false;
+            };
+            tile.population
+        };
+
+        // Check new capital is valid
+        let Some(new_tile) = self.map.get(new_capital) else {
+            return false;
+        };
+
+        if new_tile.tile_type != TileType::City {
+            return false;
+        }
+
+        if new_tile.owner != Some(player_id) {
+            return false;
+        }
+
+        if new_tile.population <= current_pop {
+            return false;
+        }
+
+        // Move capital
+        if let Some(player) = self.get_player_mut(player_id) {
+            player.move_capital(new_capital);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::Tile;
+
+    fn create_test_game() -> GameState {
+        let mut map = Map::new(10, 10).unwrap();
+
+        // Set up player 1's city at (2, 2)
+        let mut city1 = Tile::city(100);
+        city1.owner = Some(1);
+        city1.army = 10;
+        map.set(Coord::new(2, 2), city1);
+
+        // Set up player 2's city at (7, 7)
+        let mut city2 = Tile::city(100);
+        city2.owner = Some(2);
+        city2.army = 10;
+        map.set(Coord::new(7, 7), city2);
+
+        let players = vec![
+            Player::new(1, Coord::new(2, 2)),
+            Player::new(2, Coord::new(7, 7)),
+        ];
+
+        GameState::new(map, players, 1000)
+    }
+
+    #[test]
+    fn test_game_state_creation() {
+        let game = create_test_game();
+        assert_eq!(game.turn(), 0);
+        assert_eq!(game.max_turns, 1000);
+        assert!(!game.is_game_over());
+    }
+
+    #[test]
+    fn test_score_calculation() {
+        let game = create_test_game();
+
+        // Player 1: 100 pop * 1 + 1 city * 10 + 1 territory * 0.5 = 110.5
+        let score = game.calculate_score(1);
+        assert!((score - 110.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fog_of_war() {
+        let game = create_test_game();
+
+        // Player 1 can see their city
+        assert!(game.can_see_tile(1, Coord::new(2, 2)));
+
+        // Player 1 can see adjacent tiles
+        assert!(game.can_see_tile(1, Coord::new(2, 3)));
+        assert!(game.can_see_tile(1, Coord::new(3, 2)));
+
+        // Player 1 cannot see far away
+        assert!(!game.can_see_tile(1, Coord::new(7, 7)));
+
+        // Player 2 can see their own area
+        assert!(game.can_see_tile(2, Coord::new(7, 7)));
+        assert!(!game.can_see_tile(2, Coord::new(2, 2)));
+    }
+
+    #[test]
+    fn test_elimination_no_population() {
+        let mut game = create_test_game();
+
+        // Set player 1's population to 0
+        if let Some(tile) = game.map.get_mut(Coord::new(2, 2)) {
+            tile.population = 0;
+        }
+
+        game.check_eliminations();
+
+        assert!(!game.get_player(1).unwrap().alive);
+        assert!(game.get_player(2).unwrap().alive);
+    }
+
+    #[test]
+    fn test_elimination_capital_captured() {
+        let mut game = create_test_game();
+
+        // Change ownership of player 1's capital
+        if let Some(tile) = game.map.get_mut(Coord::new(2, 2)) {
+            tile.owner = Some(2);
+        }
+
+        game.check_eliminations();
+
+        assert!(!game.get_player(1).unwrap().alive);
+        assert!(game.get_player(2).unwrap().alive);
+    }
+
+    #[test]
+    fn test_game_over_turn_limit() {
+        let mut game = create_test_game();
+        game.turn = 1000;
+
+        assert!(game.is_game_over());
+    }
+
+    #[test]
+    fn test_game_over_one_player() {
+        let mut game = create_test_game();
+        game.players[1].eliminate();
+
+        assert!(game.is_game_over());
+    }
+
+    #[test]
+    fn test_move_capital() {
+        let mut game = create_test_game();
+
+        // Add a larger city for player 1
+        let mut big_city = Tile::city(200);
+        big_city.owner = Some(1);
+        game.map.set(Coord::new(3, 3), big_city);
+
+        // Should succeed - new city has more population
+        assert!(game.try_move_capital(1, Coord::new(3, 3)));
+        assert_eq!(game.get_player(1).unwrap().capital, Coord::new(3, 3));
+    }
+
+    #[test]
+    fn test_move_capital_fails_smaller() {
+        let mut game = create_test_game();
+
+        // Add a smaller city for player 1
+        let mut small_city = Tile::city(50);
+        small_city.owner = Some(1);
+        game.map.set(Coord::new(3, 3), small_city);
+
+        // Should fail - new city has less population
+        assert!(!game.try_move_capital(1, Coord::new(3, 3)));
+        assert_eq!(game.get_player(1).unwrap().capital, Coord::new(2, 2));
+    }
+}

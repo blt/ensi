@@ -6,6 +6,8 @@ description = "A deterministic RISC-V VM for programming games"
 license = "MIT"
 
 [dependencies]
+rayon = "1.10"
+goblin = "0.9"
 
 [dev-dependencies]
 proptest = "1.9"

@@ -26,6 +26,7 @@
 pub mod error;
 pub mod game;
 pub mod isa;
+pub mod tournament;
 pub mod vm;
 
 pub use error::{AccessType, TrapCause, VmResult};
@@ -213,10 +214,36 @@ impl<H: SyscallHandler> Vm<H> {
         }
     }
 
+    /// Create a VM from existing components.
+    ///
+    /// Used for restoring VM state across turns in tournaments.
+    #[must_use]
+    pub fn from_parts(cpu: Cpu, memory: Memory, handler: H, metering: MeteringConfig) -> Self {
+        Self {
+            cpu,
+            memory,
+            handler,
+            metering,
+            total_executed: 0,
+        }
+    }
+
     /// Get total instructions executed.
     #[must_use]
     pub fn total_executed(&self) -> u64 {
         self.total_executed
+    }
+
+    /// Get a reference to the syscall handler.
+    #[must_use]
+    pub fn handler_ref(&self) -> &H {
+        &self.handler
+    }
+
+    /// Take ownership of the syscall handler, consuming the VM.
+    #[must_use]
+    pub fn take_handler(self) -> H {
+        self.handler
     }
 
     /// Execute a single instruction step.

@@ -69,6 +69,10 @@ split-debuginfo = "unpacked"
 name = "vm_benchmark"
 harness = false
 
+[[bench]]
+name = "game_benchmark"
+harness = false
+
 [[bin]]
 name = "ensi"
 path = "src/main.rs"

@@ -16,15 +16,8 @@
 #   make clean    # Remove build artifacts
 #   make test     # Verify ELF files with readelf
 
-# Toolchain detection
-CROSS_COMPILE ?= $(shell which riscv64-elf-gcc >/dev/null 2>&1 && echo riscv64-elf- || \
-                          which riscv64-linux-gnu-gcc >/dev/null 2>&1 && echo riscv64-linux-gnu- || \
-                          which riscv32-unknown-elf-gcc >/dev/null 2>&1 && echo riscv32-unknown-elf- || \
-                          echo "")
-
-ifeq ($(CROSS_COMPILE),)
-$(error No RISC-V toolchain found. Install with: sudo pacman -S riscv64-elf-gcc riscv64-elf-binutils)
-endif
+# Toolchain - default to riscv64-elf, override with CROSS_COMPILE=
+CROSS_COMPILE ?= riscv64-elf-
 
 CC = $(CROSS_COMPILE)gcc
 OBJCOPY = $(CROSS_COMPILE)objcopy

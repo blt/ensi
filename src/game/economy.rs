@@ -24,15 +24,15 @@ pub fn calculate_food_balance(map: &Map, player: PlayerId) -> FoodBalance {
 
     for (_, tile) in map.tiles_owned_by(player) {
         if tile.tile_type == TileType::City {
-            total_population += tile.population as i32;
+            total_population = total_population.saturating_add(tile.population as i32);
         }
-        total_army += tile.army as i32;
+        total_army = total_army.saturating_add(tile.army as i32);
     }
 
     // Each population produces 2 food
-    let production = total_population * 2;
+    let production = total_population.saturating_mul(2);
     // Each population and army unit consumes 1 food
-    let consumption = total_population + total_army;
+    let consumption = total_population.saturating_add(total_army);
     let balance = production - consumption;
 
     FoodBalance {

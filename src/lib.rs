@@ -26,6 +26,7 @@
 pub mod error;
 pub mod game;
 pub mod isa;
+pub mod replay;
 pub mod tournament;
 pub mod vm;
 

@@ -13,6 +13,7 @@ goblin = "0.9"
 proptest = "1.9"
 criterion = { version = "0.6", features = ["html_reports"] }
 rrs-lib = "0.1"
+tempfile = "3.14"
 
 [lints.clippy]
 all = "deny"

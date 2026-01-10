@@ -39,6 +39,23 @@ pub fn load_elf(
     memory_size: u32,
     memory_base: u32,
 ) -> Result<(Cpu, Memory), ElfLoadError> {
+    let memory = Memory::new(memory_size, memory_base);
+    load_elf_into(elf_bytes, memory)
+}
+
+/// Load an ELF program into an existing Memory (resets it first).
+///
+/// This is more efficient than `load_elf` when reusing Memory from a pool,
+/// as it avoids heap allocation.
+///
+/// # Errors
+///
+/// Returns an error if the ELF is invalid, not RISC-V 32-bit, or segments
+/// don't fit in memory.
+pub(crate) fn load_elf_into(
+    elf_bytes: &[u8],
+    mut memory: Memory,
+) -> Result<(Cpu, Memory), ElfLoadError> {
     // Parse ELF header
     let elf = Elf::parse(elf_bytes).map_err(|e| ElfLoadError {
         reason: format!("Failed to parse ELF: {e}"),
@@ -47,8 +64,11 @@ pub fn load_elf(
     // Validate it's a RISC-V 32-bit executable
     validate_elf_header(&elf)?;
 
-    // Create fresh memory
-    let mut memory = Memory::new(memory_size, memory_base);
+    // Reset memory to zero (efficient for pooled memory)
+    memory.reset();
+
+    let memory_base = memory.base();
+    let memory_size = memory.size();
 
     // Load program segments
     for phdr in &elf.program_headers {

@@ -57,6 +57,17 @@ impl Cpu {
         // Enforce x0 = 0 invariant
         self.x[0] = 0;
     }
+
+    /// Get a mutable pointer to the register file for JIT access.
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer is only valid while this CPU is live and not moved.
+    /// The JIT is responsible for ensuring x0 remains zero.
+    #[inline]
+    pub fn regs_mut_ptr(&mut self) -> *mut u32 {
+        self.x.as_mut_ptr()
+    }
 }
 
 impl Default for Cpu {

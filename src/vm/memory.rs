@@ -187,6 +187,33 @@ impl Memory {
         }
         hash
     }
+
+    /// Reset memory to zero for reuse in pooling.
+    ///
+    /// This is more efficient than allocating new memory.
+    /// LLVM auto-vectorizes the fill operation.
+    #[inline]
+    pub fn reset(&mut self) {
+        self.data.fill(0);
+    }
+
+    /// Get raw access to the underlying data for bulk operations.
+    ///
+    /// Used internally for efficient memory pooling.
+    #[inline]
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
+    /// Get a mutable raw pointer to the underlying data for JIT access.
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer is only valid while this Memory is live and not moved.
+    #[inline]
+    pub fn data_mut_ptr(&mut self) -> *mut u8 {
+        self.data.as_mut_ptr()
+    }
 }
 
 #[cfg(test)]

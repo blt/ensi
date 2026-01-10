@@ -169,6 +169,31 @@ impl TournamentStats {
         }
         self.total_turns as f64 / self.games_played as f64
     }
+
+    /// Merge another TournamentStats into this one.
+    /// Used for lock-free parallel aggregation.
+    pub(super) fn merge(&mut self, other: &Self) {
+        self.games_played += other.games_played;
+        self.draws += other.draws;
+        self.total_turns += other.total_turns;
+
+        // Merge per-player stats
+        for (i, &wins) in other.wins.iter().enumerate() {
+            if i < self.wins.len() {
+                self.wins[i] += wins;
+            }
+        }
+        for (i, &score) in other.total_scores.iter().enumerate() {
+            if i < self.total_scores.len() {
+                self.total_scores[i] += score;
+            }
+        }
+        for (i, &sq_sum) in other.score_sq_sums.iter().enumerate() {
+            if i < self.score_sq_sums.len() {
+                self.score_sq_sums[i] += sq_sum;
+            }
+        }
+    }
 }
 
 /// JSON-serializable tournament result.

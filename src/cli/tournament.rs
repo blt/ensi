@@ -7,8 +7,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::Instant;
 
 /// Execute the tournament command.
@@ -76,32 +74,40 @@ pub(crate) fn execute(
     };
 
     let start = Instant::now();
+    let num_players = bots.len();
 
-    // Run games in parallel
-    let stats = Mutex::new(TournamentStats::new(bots.len()));
-    let completed = AtomicU64::new(0);
+    // Run games in parallel using lock-free fold/reduce pattern
+    // Each thread accumulates into its own TournamentStats, then we merge at the end
+    // Progress is tracked via games_played in stats (no atomics in hot path)
+    let stats = (0..games)
+        .into_par_iter()
+        .fold(
+            || TournamentStats::new(num_players),
+            |mut local_stats, i| {
+                let game_seed = base_seed.wrapping_add(i);
 
-    (0..games).into_par_iter().for_each(|i| {
-        let game_seed = base_seed.wrapping_add(i);
+                if let Ok(result) = run_game(game_seed, &programs, &config) {
+                    local_stats.add_result(&result);
+                }
 
-        if let Ok(result) = run_game(game_seed, &programs, &config) {
-            if let Ok(mut stats) = stats.lock() {
-                stats.add_result(&result);
-            }
-        }
+                local_stats
+            },
+        )
+        .reduce(
+            || TournamentStats::new(num_players),
+            |mut a, b| {
+                a.merge(&b);
+                a
+            },
+        );
 
-        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Some(ref pb) = pb {
-            pb.set_position(done);
-        }
-    });
-
+    // Update progress bar after completion (no atomic overhead in hot path)
     if let Some(pb) = pb {
+        pb.set_position(stats.games_played);
         pb.finish_with_message("done");
     }
 
     let duration = start.elapsed();
-    let stats = stats.into_inner().map_err(|e| CliError::new(format!("Lock error: {e}")))?;
 
     // Calculate games per second
     let games_per_sec = if duration.as_secs_f64() > 0.0 {

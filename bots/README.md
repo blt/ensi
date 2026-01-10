@@ -1,78 +1,84 @@
 # Ensi Bots
 
-This directory contains RISC-V bot implementations for the Ensi game.
+This directory contains WASM bot implementations for the Ensi game.
 
 ## Building
 
-Requires a RISC-V toolchain:
+Requires clang with WASM target:
 
 ```bash
-# Arch Linux
-sudo pacman -S riscv64-elf-gcc riscv64-elf-binutils
+# Build a bot
+clang --target=wasm32-unknown-unknown -O3 -nostdlib \
+      -Wl,--no-entry -Wl,--export=run_turn \
+      -o mybot.wasm mybot.c
 
-# Ubuntu/Debian
-sudo apt install gcc-riscv64-linux-gnu
-
-# Then build
-make
+# Or use the SDK makefile
+cd ../sdk && make
 ```
 
-## Bots
+## Example Bot
 
-| Bot | Strategy | Description |
-|-----|----------|-------------|
-| `aggressive.c` | Military | Maximizes army, attacks enemies aggressively |
-| `economic.c` | Defensive | Focuses on population growth, minimal army |
-| `balanced.c` | Adaptive | Changes strategy based on game phase |
-| `explorer.c` | Territory | Systematic exploration and expansion |
+`example_bot.c` demonstrates the SDK API - converts population to army
+and expands aggressively.
 
 ## SDK
 
-The `ensi.h` header provides the game interface:
+The `ensi.h` header provides the game interface.
 
 ### Query Functions
-- `get_turn()` - Current turn number (0-indexed)
-- `get_player_id()` - Your player ID (1-8)
-- `get_my_capital()` - Your capital coordinates
-- `get_tile(x, y)` - Tile info (respects fog of war)
-- `get_my_food()` - Food balance (can be negative)
-- `get_my_population()` - Total population
-- `get_my_army()` - Total army
-- `get_map_size()` - Map dimensions
+- `ensi_get_turn()` - Current turn number (0-indexed)
+- `ensi_get_player_id()` - Your player ID (1-8)
+- `ensi_get_my_capital()` - Your capital coordinates (packed)
+- `ensi_get_tile(x, y)` - Tile info (respects fog of war)
+- `ensi_get_my_food()` - Food balance (can be negative)
+- `ensi_get_my_population()` - Total population
+- `ensi_get_my_army()` - Total army
+- `ensi_get_map_width/height()` - Map dimensions
+
+### High-Performance Tile Access
+- `ensi_tile_map_get(x, y)` - Read tile from push-based visibility map (100x faster)
 
 ### Command Functions
-- `move_army(from, to, count)` - Move army to adjacent tile
-- `convert_pop(city, count)` - Convert population to army
-- `move_capital(city)` - Move capital to larger city
-- `yield_turn()` - End turn early
+- `ensi_move(fx, fy, tx, ty, count)` - Move army to adjacent tile
+- `ensi_convert(cx, cy, count)` - Convert population to army
+- `ensi_move_capital(cx, cy)` - Move capital to larger city
+- `ensi_yield()` - End turn early
 
-### Game Mechanics
-- **Food**: Each population produces +2, consumes -1 (net +1)
-- **Army**: Each army consumes -1 food (no production)
-- **Combat**: Larger army wins, loses the smaller's count
-- **Cities**: Produce food, house population
-- **Fog**: Only see owned tiles and neighbors
+### Compatibility Layer
+For simpler code, use the compatibility wrapper functions which provide
+struct-based interfaces:
+- `get_tile(x, y)` returns `TileInfo` struct (uses push-based map)
+- `move_army(from, to, count)` takes `Coord` structs
+- `convert_pop(city, count)` takes `Coord` struct
+- etc.
 
 ## Writing Your Own Bot
 
 ```c
 #include "ensi.h"
 
-int main(void) {
-    while (1) {
-        uint8_t my_id = get_player_id();
-        MapSize map = get_map_size();
+int run_turn(int fuel_budget) {
+    int my_id = ensi_get_player_id();
+    int width = ensi_get_map_width();
+    int height = ensi_get_map_height();
 
-        // Your strategy here
-
-        yield_turn();
+    // Scan map using push-based visibility (no syscall overhead)
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int tile = ensi_tile_map_get(x, y);
+            if (TILE_OWNED_BY(tile, my_id) && TILE_IS_CITY(tile)) {
+                // Your strategy here
+            }
+        }
     }
+
+    ensi_yield();
     return 0;
 }
 ```
 
 Key constraints:
-- No floating point (RV32IM only)
-- No stdlib (bare metal)
-- Per-turn instruction budget
-- Must call `yield_turn()` or run out of budget
+- Entry point must be `int run_turn(int fuel_budget)`
+- No libc (use -nostdlib)
+- Per-turn fuel budget
+- Call `ensi_yield()` to end turn early

@@ -107,6 +107,14 @@ enum Commands {
         #[arg(short = 'j', long)]
         threads: Option<usize>,
 
+        /// Instruction budget per turn (default: 100000)
+        #[arg(short, long)]
+        budget: Option<u32>,
+
+        /// Maximum turns per game (default: 1000)
+        #[arg(short = 't', long)]
+        max_turns: Option<u32>,
+
         /// Output format: text, json, or csv
         #[arg(short, long, default_value = "text")]
         format: cli::TournamentFormat,
@@ -157,9 +165,11 @@ fn main() -> ExitCode {
             games,
             seed,
             threads,
+            budget,
+            max_turns,
             format,
             progress,
-        } => cli::tournament::execute(bots, games, seed, threads, format, progress),
+        } => cli::tournament::execute(bots, games, seed, threads, budget, max_turns, format, progress),
 
         Commands::Validate { bot } => cli::validate::execute(bot),
     };

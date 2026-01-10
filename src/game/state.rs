@@ -5,6 +5,55 @@ use crate::game::{
     PlayerId, TileType,
 };
 
+/// Maximum number of players in a game.
+pub const MAX_PLAYERS: usize = 8;
+
+/// Pre-computed statistics for a player.
+///
+/// This cache is computed once at the start of each turn and used
+/// for all syscalls during that turn. This eliminates O(n) map iterations
+/// per syscall, replacing them with O(1) lookups.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CachedPlayerStats {
+    /// Total population across all cities.
+    pub population: u32,
+    /// Total army across all tiles.
+    pub army: u32,
+    /// Total territory (non-mountain tiles owned).
+    pub territory: u32,
+    /// Food balance for the turn.
+    pub food_balance: i32,
+}
+
+/// Collection of cached stats for all players.
+///
+/// Uses a fixed-size array indexed by player_id - 1 to avoid heap allocation.
+#[derive(Debug, Clone, Copy)]
+pub struct AllPlayerStats {
+    /// Stats indexed by player_id - 1.
+    stats: [CachedPlayerStats; MAX_PLAYERS],
+}
+
+impl Default for AllPlayerStats {
+    fn default() -> Self {
+        Self {
+            stats: [CachedPlayerStats::default(); MAX_PLAYERS],
+        }
+    }
+}
+
+impl AllPlayerStats {
+    /// Get stats for a player.
+    #[must_use]
+    #[inline]
+    pub fn get(&self, player_id: PlayerId) -> CachedPlayerStats {
+        if player_id == 0 || player_id as usize > MAX_PLAYERS {
+            return CachedPlayerStats::default();
+        }
+        self.stats[(player_id - 1) as usize]
+    }
+}
+
 /// Scoring weights for final score calculation.
 #[derive(Debug, Clone, Copy)]
 pub struct ScoringWeights {
@@ -164,7 +213,9 @@ impl GameState {
     }
 
     /// Check for eliminated players (capital captured or zero population).
-    pub fn check_eliminations(&mut self) {
+    ///
+    /// Uses pre-computed stats to avoid re-iterating the map.
+    pub fn check_eliminations(&mut self, all_stats: &AllPlayerStats) {
         for player in &mut self.players {
             if !player.alive {
                 continue;
@@ -176,8 +227,8 @@ impl GameState {
                 .get(player.capital)
                 .map_or(false, |tile| tile.owner == Some(player.id));
 
-            // Check if player has any population
-            let total_pop = self.map.total_population(player.id);
+            // Use pre-computed stats instead of iterating map
+            let total_pop = all_stats.get(player.id).population;
 
             if !capital_owned || total_pop == 0 {
                 player.eliminate();
@@ -198,6 +249,72 @@ impl GameState {
     /// Get all alive players.
     pub fn alive_players(&self) -> impl Iterator<Item = &Player> {
         self.players.iter().filter(|p| p.alive)
+    }
+
+    /// Compute cached stats for all players in a single pass over the map.
+    ///
+    /// This is O(n) where n is the number of tiles, but only needs to be
+    /// called once per turn. The returned stats can then be used for O(1)
+    /// lookups during syscall handling.
+    #[must_use]
+    pub fn compute_all_player_stats(&self) -> AllPlayerStats {
+        let mut result = AllPlayerStats::default();
+
+        // Single pass over all tiles
+        for (_, tile) in self.map.iter() {
+            if let Some(owner) = tile.owner {
+                if owner == 0 || owner as usize > MAX_PLAYERS {
+                    continue;
+                }
+                let idx = (owner - 1) as usize;
+
+                // Count territory (non-mountain)
+                if tile.tile_type != TileType::Mountain {
+                    result.stats[idx].territory += 1;
+                }
+
+                // Sum army
+                result.stats[idx].army = result.stats[idx].army.saturating_add(tile.army);
+
+                // Sum population (cities only)
+                if tile.tile_type == TileType::City {
+                    result.stats[idx].population =
+                        result.stats[idx].population.saturating_add(tile.population);
+                }
+            }
+        }
+
+        // Compute food balance for each player using the collected stats
+        for stats in &mut result.stats {
+            if stats.territory > 0 {
+                // Use the same formula as calculate_food_balance
+                let production = Self::calculate_production(stats.territory, stats.population);
+                let consumption = stats.population.saturating_add(stats.army);
+                stats.food_balance = (production as i32).saturating_sub(consumption as i32);
+            }
+        }
+
+        result
+    }
+
+    /// Calculate production using the Cobb-Douglas formula.
+    ///
+    /// This is the same formula used in economy.rs.
+    fn calculate_production(territory: u32, population: u32) -> u32 {
+        const WORKERS_PER_TILE: u32 = 50;
+        const SCALING_FACTOR: f64 = 7.0;
+
+        if territory == 0 || population == 0 {
+            return 0;
+        }
+
+        let max_workers = territory.saturating_mul(WORKERS_PER_TILE);
+        let effective_workers = population.min(max_workers);
+
+        let labor_factor = (effective_workers as f64).sqrt();
+        let land_factor = (territory as f64).sqrt();
+
+        (labor_factor * land_factor * SCALING_FACTOR) as u32
     }
 
     /// Try to move a player's capital to a new city.
@@ -315,7 +432,8 @@ mod tests {
             tile.population = 0;
         }
 
-        game.check_eliminations();
+        let all_stats = game.compute_all_player_stats();
+        game.check_eliminations(&all_stats);
 
         assert!(!game.get_player(1).unwrap().alive);
         assert!(game.get_player(2).unwrap().alive);
@@ -330,7 +448,8 @@ mod tests {
             tile.owner = Some(2);
         }
 
-        game.check_eliminations();
+        let all_stats = game.compute_all_player_stats();
+        game.check_eliminations(&all_stats);
 
         assert!(!game.get_player(1).unwrap().alive);
         assert!(game.get_player(2).unwrap().alive);

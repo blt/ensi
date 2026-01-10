@@ -39,10 +39,10 @@ pub(crate) fn execute(
     let mut bot_names = Vec::with_capacity(bots.len());
 
     for bot_path in &bots {
-        let elf_bytes = fs::read(bot_path).map_err(|e| {
+        let wasm_bytes = fs::read(bot_path).map_err(|e| {
             CliError::new(format!("Failed to read {}: {e}", bot_path.display()))
         })?;
-        programs.push(PlayerProgram::new(elf_bytes.clone()));
+        programs.push(PlayerProgram::new(wasm_bytes.clone()));
         bot_names.push(
             bot_path
                 .file_name()
@@ -67,8 +67,8 @@ pub(crate) fn execute(
     };
 
     // Create recording and replay engine
-    let elf_bytes: Vec<Vec<u8>> = programs.iter().map(|p| p.elf_bytes.clone()).collect();
-    let recording = Recording::new(seed, elf_bytes, config);
+    let wasm_bytes: Vec<Vec<u8>> = programs.iter().map(|p| p.wasm_bytes.clone()).collect();
+    let recording = Recording::new(seed, wasm_bytes, config);
     let engine = ReplayEngine::new(recording)?;
 
     // Run the TUI

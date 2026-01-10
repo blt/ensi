@@ -137,7 +137,8 @@ fuzz_target!(|input: GameTurnInput| {
         apply_economy(&mut game_state.map, 2, rng.wrapping_add(1));
 
         // Phase 5: Check eliminations
-        game_state.check_eliminations();
+        let all_stats = game_state.compute_all_player_stats();
+        game_state.check_eliminations(&all_stats);
 
         // Verify invariants after each turn
         let violations = check_invariants(&game_state);

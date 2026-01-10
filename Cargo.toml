@@ -2,12 +2,11 @@
 name = "ensi"
 version = "0.1.0"
 edition = "2024"
-description = "A deterministic RISC-V VM for programming games"
+description = "A deterministic WASM-based game engine for programming competitions"
 license = "MIT"
 
 [dependencies]
 rayon = "1.10"
-goblin = "0.9"
 clap = { version = "4.5", features = ["derive"] }
 ratatui = "0.29"
 crossterm = "0.28"
@@ -15,17 +14,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 indicatif = "0.17"
 
-# JIT compilation
-cranelift-codegen = "0.116"
-cranelift-frontend = "0.116"
-cranelift-jit = "0.116"
-cranelift-module = "0.116"
-cranelift-native = "0.116"
+# WASM runtime with fuel metering
+wasmtime = "28"
 
 [dev-dependencies]
 proptest = "1.9"
 criterion = { version = "0.6", features = ["html_reports"] }
-rrs-lib = "0.1"
 tempfile = "3.14"
 
 [lints.clippy]
@@ -71,10 +65,6 @@ split-debuginfo = "unpacked"
 panic = "abort"
 debug = 2
 split-debuginfo = "unpacked"
-
-[[bench]]
-name = "vm_benchmark"
-harness = false
 
 [[bench]]
 name = "game_benchmark"

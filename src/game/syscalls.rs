@@ -1,16 +1,13 @@
-//! Syscall handler for game interaction.
+//! Game commands and syscall constants.
 
-use crate::error::{TrapCause, VmResult};
-use crate::game::{Coord, GameState, PlayerId, TileType};
-use crate::vm::{Cpu, Memory};
-use crate::SyscallHandler;
+use crate::game::{CachedPlayerStats, Coord, GameState, PlayerId, TileType};
 
 /// Maximum commands per turn per player. 256 is generous - typical turns use <50.
 pub const MAX_COMMANDS_PER_TURN: usize = 256;
 
 /// Syscall numbers for game interaction.
 ///
-/// Programs use these numbers in register a7 (x17) to specify which syscall to invoke.
+/// Programs use these numbers to specify which operation to invoke.
 pub mod syscall {
     /// Get the current turn number.
     pub const GET_TURN: u32 = 1;
@@ -36,22 +33,6 @@ pub mod syscall {
     pub const MOVE_CAPITAL: u32 = 102;
     /// End turn early.
     pub const YIELD: u32 = 103;
-}
-
-/// Constants for packing tile information.
-mod packed {
-    pub(super) const FOG_TILE_TYPE: u8 = 255;
-    pub(super) const FOG_OWNER: u8 = 255;
-
-    #[must_use]
-    pub(super) fn pack_tile(tile_type: u8, owner: u8, army: u16) -> u32 {
-        u32::from(tile_type) | (u32::from(owner) << 8) | (u32::from(army) << 16)
-    }
-
-    #[must_use]
-    pub(super) fn fog() -> u32 {
-        pack_tile(FOG_TILE_TYPE, FOG_OWNER, 0)
-    }
 }
 
 /// A command issued by a player during their turn.
@@ -82,21 +63,20 @@ pub enum Command {
     Yield,
 }
 
-/// Syscall handler for game interaction.
+/// Syscall handler data for game interaction.
 ///
-/// This handler implements the `SyscallHandler` trait and provides
-/// game-specific syscalls for querying state and issuing commands.
-///
-/// Takes an immutable reference to game state for zero-copy reads.
-/// Uses fixed-size arrays to avoid heap allocations in the hot path.
+/// This struct holds the data needed to handle game syscalls.
+/// Used by the WASM host functions to access game state.
 pub struct GameSyscallHandler<'a> {
     /// ID of the player this handler serves.
     player_id: PlayerId,
-    /// Immutable reference to game state (no locking overhead).
+    /// Immutable reference to game state.
     game_state: &'a GameState,
+    /// Pre-computed stats for this player (O(1) lookup).
+    cached_stats: CachedPlayerStats,
     /// Commands accumulated during this turn (fixed array, no heap).
     commands: [Command; MAX_COMMANDS_PER_TURN],
-    /// Number of commands accumulated (index into commands array).
+    /// Number of commands accumulated.
     command_count: u16,
     /// Whether the player has yielded.
     yielded: bool,
@@ -113,13 +93,17 @@ impl<'a> std::fmt::Debug for GameSyscallHandler<'a> {
 }
 
 impl<'a> GameSyscallHandler<'a> {
-    /// Create a new syscall handler for the given player.
+    /// Create a new syscall handler for the given player with pre-computed stats.
     #[must_use]
-    pub fn new(player_id: PlayerId, game_state: &'a GameState) -> Self {
+    pub fn new(
+        player_id: PlayerId,
+        game_state: &'a GameState,
+        cached_stats: CachedPlayerStats,
+    ) -> Self {
         Self {
             player_id,
             game_state,
-            // Initialize with Yield (no-op) - only command_count entries are valid
+            cached_stats,
             commands: [Command::Yield; MAX_COMMANDS_PER_TURN],
             command_count: 0,
             yielded: false,
@@ -147,6 +131,27 @@ impl<'a> GameSyscallHandler<'a> {
         self.yielded
     }
 
+    /// Get the player ID.
+    #[must_use]
+    #[inline]
+    pub const fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    /// Get the game state.
+    #[must_use]
+    #[inline]
+    pub const fn game_state(&self) -> &GameState {
+        self.game_state
+    }
+
+    /// Get the cached stats.
+    #[must_use]
+    #[inline]
+    pub const fn cached_stats(&self) -> &CachedPlayerStats {
+        &self.cached_stats
+    }
+
     /// Reset state for a new turn.
     #[inline]
     pub fn reset(&mut self) {
@@ -156,7 +161,7 @@ impl<'a> GameSyscallHandler<'a> {
 
     /// Add a command. Returns false if buffer is full.
     #[inline]
-    fn push_command(&mut self, cmd: Command) -> bool {
+    pub fn push_command(&mut self, cmd: Command) -> bool {
         if (self.command_count as usize) < MAX_COMMANDS_PER_TURN {
             self.commands[self.command_count as usize] = cmd;
             self.command_count += 1;
@@ -165,184 +170,38 @@ impl<'a> GameSyscallHandler<'a> {
             false
         }
     }
-}
 
-impl<'a> SyscallHandler for GameSyscallHandler<'a> {
-    fn handle(&mut self, cpu: &mut Cpu, _memory: &mut Memory) -> VmResult<()> {
-        let syscall_num = cpu.read_reg(17); // a7
-
-        match syscall_num {
-            syscall::GET_TURN => {
-                cpu.write_reg(10, self.game_state.turn());
-                Ok(())
-            }
-
-            syscall::GET_PLAYER_ID => {
-                cpu.write_reg(10, u32::from(self.player_id));
-                Ok(())
-            }
-
-            syscall::GET_MY_CAPITAL => {
-                if let Some(player) = self.game_state.get_player(self.player_id) {
-                    let packed = pack_coord(player.capital);
-                    cpu.write_reg(10, packed);
-                } else {
-                    cpu.write_reg(10, u32::MAX);
-                }
-                Ok(())
-            }
-
-            syscall::GET_TILE => {
-                let x = cpu.read_reg(10) as u16; // a0
-                let y = cpu.read_reg(11) as u16; // a1
-                let coord = Coord::new(x, y);
-
-                // Check fog of war
-                if !self.game_state.can_see_tile(self.player_id, coord) {
-                    cpu.write_reg(10, packed::fog());
-                    return Ok(());
-                }
-
-                // Get tile info
-                if let Some(tile) = self.game_state.map.get(coord) {
-                    let tile_type = match tile.tile_type {
-                        TileType::City => 0,
-                        TileType::Desert => 1,
-                        TileType::Mountain => 2,
-                    };
-                    let owner = tile.owner.map_or(0, |id| id);
-                    let army = tile.army.min(65535) as u16;
-
-                    cpu.write_reg(10, packed::pack_tile(tile_type, owner, army));
-                } else {
-                    cpu.write_reg(10, packed::fog());
-                }
-                Ok(())
-            }
-
-            syscall::GET_MY_FOOD => {
-                let balance = self.game_state.food_balance(self.player_id);
-                // Return as signed i32 cast to u32
-                cpu.write_reg(10, balance.balance as u32);
-                Ok(())
-            }
-
-            syscall::GET_MY_POPULATION => {
-                let pop = self.game_state.map.total_population(self.player_id);
-                cpu.write_reg(10, pop);
-                Ok(())
-            }
-
-            syscall::GET_MY_ARMY => {
-                let army = self.game_state.map.total_army(self.player_id);
-                cpu.write_reg(10, army);
-                Ok(())
-            }
-
-            syscall::GET_MAP_SIZE => {
-                let packed = (u32::from(self.game_state.map.width()) << 16)
-                    | u32::from(self.game_state.map.height());
-                cpu.write_reg(10, packed);
-                Ok(())
-            }
-
-            syscall::MOVE => {
-                let from_x = cpu.read_reg(10) as u16;
-                let from_y = cpu.read_reg(11) as u16;
-                let to_x = cpu.read_reg(12) as u16;
-                let to_y = cpu.read_reg(13) as u16;
-                let count = cpu.read_reg(14);
-
-                let from = Coord::new(from_x, from_y);
-                let to = Coord::new(to_x, to_y);
-
-                // Validate the move
-                let result = self.validate_move(from, to, count);
-                cpu.write_reg(10, u32::from(!result));
-
-                if result {
-                    self.push_command(Command::Move { from, to, count });
-                }
-                Ok(())
-            }
-
-            syscall::CONVERT => {
-                let city_x = cpu.read_reg(10) as u16;
-                let city_y = cpu.read_reg(11) as u16;
-                let count = cpu.read_reg(12);
-
-                let city = Coord::new(city_x, city_y);
-
-                // Validate the conversion
-                let result = self.validate_convert(city, count);
-                cpu.write_reg(10, u32::from(!result));
-
-                if result {
-                    self.push_command(Command::Convert { city, count });
-                }
-                Ok(())
-            }
-
-            syscall::MOVE_CAPITAL => {
-                let city_x = cpu.read_reg(10) as u16;
-                let city_y = cpu.read_reg(11) as u16;
-                let new_capital = Coord::new(city_x, city_y);
-
-                // Validate capital move
-                let result = self.validate_move_capital(new_capital);
-                cpu.write_reg(10, u32::from(!result));
-
-                if result {
-                    self.push_command(Command::MoveCapital { new_capital });
-                }
-                Ok(())
-            }
-
-            syscall::YIELD => {
-                self.yielded = true;
-                cpu.write_reg(10, 0);
-                Ok(())
-            }
-
-            _ => {
-                // Unknown syscall
-                cpu.write_reg(10, u32::MAX);
-                Err(TrapCause::Ecall)
-            }
-        }
+    /// Set yielded flag.
+    #[inline]
+    pub fn set_yielded(&mut self, yielded: bool) {
+        self.yielded = yielded;
     }
-}
 
-impl<'a> GameSyscallHandler<'a> {
     /// Validate a move command.
-    fn validate_move(&self, from: Coord, to: Coord, count: u32) -> bool {
+    #[must_use]
+    pub fn validate_move(&self, from: Coord, to: Coord, count: u32) -> bool {
         if count == 0 {
             return false;
         }
 
-        // Check source tile
         let Some(from_tile) = self.game_state.map.get(from) else {
             return false;
         };
 
-        // Must own the source tile
         if from_tile.owner != Some(self.player_id) {
             return false;
         }
 
-        // Must have enough army
         if from_tile.army < count {
             return false;
         }
 
-        // Check destination is adjacent
         let (adjacent, adj_count) = from.adjacent(self.game_state.map.width(), self.game_state.map.height());
         let is_adjacent = adjacent[..adj_count as usize].contains(&to);
         if !is_adjacent {
             return false;
         }
 
-        // Check destination is passable
         let Some(to_tile) = self.game_state.map.get(to) else {
             return false;
         };
@@ -351,7 +210,8 @@ impl<'a> GameSyscallHandler<'a> {
     }
 
     /// Validate a convert command.
-    fn validate_convert(&self, city: Coord, count: u32) -> bool {
+    #[must_use]
+    pub fn validate_convert(&self, city: Coord, count: u32) -> bool {
         if count == 0 {
             return false;
         }
@@ -360,55 +220,43 @@ impl<'a> GameSyscallHandler<'a> {
             return false;
         };
 
-        // Must be a city
         if tile.tile_type != TileType::City {
             return false;
         }
 
-        // Must own the city
         if tile.owner != Some(self.player_id) {
             return false;
         }
 
-        // Must have enough population
         tile.population >= count
     }
 
     /// Validate a capital move command.
-    fn validate_move_capital(&self, new_capital: Coord) -> bool {
+    #[must_use]
+    pub fn validate_move_capital(&self, new_capital: Coord) -> bool {
         let Some(player) = self.game_state.get_player(self.player_id) else {
             return false;
         };
 
-        // Get current capital population
         let Some(current_tile) = self.game_state.map.get(player.capital) else {
             return false;
         };
         let current_pop = current_tile.population;
 
-        // Check new capital
         let Some(new_tile) = self.game_state.map.get(new_capital) else {
             return false;
         };
 
-        // Must be a city
         if new_tile.tile_type != TileType::City {
             return false;
         }
 
-        // Must own it
         if new_tile.owner != Some(self.player_id) {
             return false;
         }
 
-        // Must have more population
         new_tile.population > current_pop
     }
-}
-
-/// Pack a coordinate into a single u32.
-fn pack_coord(coord: Coord) -> u32 {
-    (u32::from(coord.x) << 16) | u32::from(coord.y)
 }
 
 #[cfg(test)]
@@ -417,15 +265,13 @@ mod tests {
     use crate::game::{Map, Player, Tile};
 
     fn create_test_state() -> GameState {
-        let mut map = Map::new(10, 10).unwrap();
+        let mut map = Map::new(10, 10).expect("create map");
 
-        // Player 1's city at (2, 2)
         let mut city1 = Tile::city(100);
         city1.owner = Some(1);
         city1.army = 50;
         map.set(Coord::new(2, 2), city1);
 
-        // Player 1 also owns adjacent tile
         let mut desert = Tile::desert();
         desert.owner = Some(1);
         desert.army = 10;
@@ -435,126 +281,63 @@ mod tests {
         GameState::new(map, players, 1000)
     }
 
-    #[test]
-    fn test_get_turn() {
-        let state = create_test_state();
-        let mut handler = GameSyscallHandler::new(1, &state);
-        let mut cpu = Cpu::new();
-        let mut memory = Memory::new(1024, 0);
-
-        cpu.write_reg(17, syscall::GET_TURN);
-        handler.handle(&mut cpu, &mut memory).unwrap();
-
-        assert_eq!(cpu.read_reg(10), 0);
-    }
-
-    #[test]
-    fn test_get_player_id() {
-        let state = create_test_state();
-        let mut handler = GameSyscallHandler::new(1, &state);
-        let mut cpu = Cpu::new();
-        let mut memory = Memory::new(1024, 0);
-
-        cpu.write_reg(17, syscall::GET_PLAYER_ID);
-        handler.handle(&mut cpu, &mut memory).unwrap();
-
-        assert_eq!(cpu.read_reg(10), 1);
-    }
-
-    #[test]
-    fn test_get_tile_visible() {
-        let state = create_test_state();
-        let mut handler = GameSyscallHandler::new(1, &state);
-        let mut cpu = Cpu::new();
-        let mut memory = Memory::new(1024, 0);
-
-        cpu.write_reg(17, syscall::GET_TILE);
-        cpu.write_reg(10, 2); // x
-        cpu.write_reg(11, 2); // y
-        handler.handle(&mut cpu, &mut memory).unwrap();
-
-        let result = cpu.read_reg(10);
-        let tile_type = (result & 0xFF) as u8;
-        let owner = ((result >> 8) & 0xFF) as u8;
-        let army = (result >> 16) as u16;
-
-        assert_eq!(tile_type, 0); // City
-        assert_eq!(owner, 1); // Player 1
-        assert_eq!(army, 50);
-    }
-
-    #[test]
-    fn test_get_tile_fog() {
-        let state = create_test_state();
-        let mut handler = GameSyscallHandler::new(1, &state);
-        let mut cpu = Cpu::new();
-        let mut memory = Memory::new(1024, 0);
-
-        cpu.write_reg(17, syscall::GET_TILE);
-        cpu.write_reg(10, 9); // x - far away
-        cpu.write_reg(11, 9); // y
-        handler.handle(&mut cpu, &mut memory).unwrap();
-
-        assert_eq!(cpu.read_reg(10), packed::fog());
+    fn create_handler(state: &GameState, player_id: PlayerId) -> GameSyscallHandler<'_> {
+        let all_stats = state.compute_all_player_stats();
+        GameSyscallHandler::new(player_id, state, all_stats.get(player_id))
     }
 
     #[test]
     fn test_validate_move_valid() {
         let state = create_test_state();
-        let handler = GameSyscallHandler::new(1, &state);
-
-        // Move from (3, 2) to (4, 2) - adjacent, owned, has army
+        let handler = create_handler(&state, 1);
         assert!(handler.validate_move(Coord::new(3, 2), Coord::new(4, 2), 5));
     }
 
     #[test]
     fn test_validate_move_not_adjacent() {
         let state = create_test_state();
-        let handler = GameSyscallHandler::new(1, &state);
-
-        // Try to move to non-adjacent tile
+        let handler = create_handler(&state, 1);
         assert!(!handler.validate_move(Coord::new(2, 2), Coord::new(5, 5), 5));
     }
 
     #[test]
     fn test_validate_move_not_owned() {
         let state = create_test_state();
-        let handler = GameSyscallHandler::new(1, &state);
-
-        // Try to move from unowned tile
+        let handler = create_handler(&state, 1);
         assert!(!handler.validate_move(Coord::new(0, 0), Coord::new(0, 1), 5));
     }
 
     #[test]
     fn test_validate_convert() {
         let state = create_test_state();
-        let handler = GameSyscallHandler::new(1, &state);
-
-        // Convert 50 population to army in owned city
+        let handler = create_handler(&state, 1);
         assert!(handler.validate_convert(Coord::new(2, 2), 50));
     }
 
     #[test]
     fn test_validate_convert_not_enough_pop() {
         let state = create_test_state();
-        let handler = GameSyscallHandler::new(1, &state);
-
-        // Try to convert more than available
+        let handler = create_handler(&state, 1);
         assert!(!handler.validate_convert(Coord::new(2, 2), 200));
     }
 
     #[test]
-    fn test_yield() {
+    fn test_push_command() {
         let state = create_test_state();
-        let mut handler = GameSyscallHandler::new(1, &state);
-        let mut cpu = Cpu::new();
-        let mut memory = Memory::new(1024, 0);
+        let mut handler = create_handler(&state, 1);
+
+        assert_eq!(handler.command_count(), 0);
+        assert!(handler.push_command(Command::Yield));
+        assert_eq!(handler.command_count(), 1);
+    }
+
+    #[test]
+    fn test_yielded() {
+        let state = create_test_state();
+        let mut handler = create_handler(&state, 1);
 
         assert!(!handler.has_yielded());
-
-        cpu.write_reg(17, syscall::YIELD);
-        handler.handle(&mut cpu, &mut memory).unwrap();
-
+        handler.set_yielded(true);
         assert!(handler.has_yielded());
     }
 }

@@ -342,6 +342,16 @@ static inline int distance(Coord a, Coord b) {
     return dx + dy;
 }
 
+/** Check if two coords are adjacent. */
+static inline int is_adjacent(Coord a, Coord b) {
+    return distance(a, b) == 1;
+}
+
+/** Get food balance. */
+static inline int get_my_food(void) {
+    return ensi_get_my_food();
+}
+
 /*============================================================================
  * Bot Entry Point
  *

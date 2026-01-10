@@ -23,5 +23,5 @@ pub use invariants::{
 };
 pub use map::{Coord, Map, Tile, TileType};
 pub use player::{Player, PlayerId};
-pub use state::{GameState, ScoringWeights};
+pub use state::{AllPlayerStats, CachedPlayerStats, GameState, ScoringWeights, MAX_PLAYERS};
 pub use syscalls::{syscall, Command, GameSyscallHandler, MAX_COMMANDS_PER_TURN};

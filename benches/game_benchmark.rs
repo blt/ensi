@@ -9,7 +9,7 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 use ensi::tournament::{PlayerProgram, TournamentConfig, run_game};
 
-/// Load bot ELF from the bots directory.
+/// Load bot WASM from the bots directory.
 fn load_bot(name: &str) -> PlayerProgram {
     let path = format!("bots/{name}");
     let bytes = std::fs::read(&path).expect(&format!("Failed to load {path}"));
@@ -18,8 +18,8 @@ fn load_bot(name: &str) -> PlayerProgram {
 
 fn bench_single_game(c: &mut Criterion) {
     // Load two bots
-    let balanced = load_bot("balanced.elf");
-    let economic = load_bot("economic.elf");
+    let balanced = load_bot("balanced.wasm");
+    let economic = load_bot("economic.wasm");
     let programs = vec![balanced, economic];
     let config = TournamentConfig::default();
 
@@ -33,10 +33,10 @@ fn bench_single_game(c: &mut Criterion) {
 
 fn bench_single_game_4p(c: &mut Criterion) {
     // Load four bots for more realistic tournament scenario
-    let balanced = load_bot("balanced.elf");
-    let economic = load_bot("economic.elf");
-    let aggressive = load_bot("aggressive.elf");
-    let explorer = load_bot("explorer.elf");
+    let balanced = load_bot("balanced.wasm");
+    let economic = load_bot("economic.wasm");
+    let aggressive = load_bot("aggressive.wasm");
+    let explorer = load_bot("explorer.wasm");
     let programs = vec![balanced, economic, aggressive, explorer];
     let config = TournamentConfig::default();
 
@@ -50,8 +50,8 @@ fn bench_single_game_4p(c: &mut Criterion) {
 
 fn bench_game_batch(c: &mut Criterion) {
     // Benchmark running 10 games sequentially (without parallel overhead)
-    let balanced = load_bot("balanced.elf");
-    let economic = load_bot("economic.elf");
+    let balanced = load_bot("balanced.wasm");
+    let economic = load_bot("economic.wasm");
     let programs = vec![balanced, economic];
     let config = TournamentConfig::default();
 
@@ -66,15 +66,15 @@ fn bench_game_batch(c: &mut Criterion) {
 }
 
 fn bench_short_game(c: &mut Criterion) {
-    // Benchmark with shorter turn budget to see if VM is the bottleneck
-    let balanced = load_bot("balanced.elf");
-    let economic = load_bot("economic.elf");
+    // Benchmark with shorter fuel budget to see if WASM is the bottleneck
+    let balanced = load_bot("balanced.wasm");
+    let economic = load_bot("economic.wasm");
     let programs = vec![balanced, economic];
 
-    // Short game: 100 turns, 10k instructions per turn
+    // Short game: 100 turns, 10k fuel per turn
     let mut config = TournamentConfig::default();
     config.max_turns = 100;
-    config.turn_budget = 10_000;
+    config.fuel_budget = 10_000;
 
     c.bench_function("short_game_2p", |b| {
         b.iter(|| {

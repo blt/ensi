@@ -23,8 +23,8 @@ pub(super) struct JsonPlayerResult {
     pub(super) id: u8,
     /// Final score.
     pub(super) score: f64,
-    /// Total instructions executed.
-    pub(super) instructions: u64,
+    /// Total fuel consumed.
+    pub(super) fuel_consumed: u64,
     /// Turn eliminated (null if survived).
     pub(super) eliminated_turn: Option<u32>,
 }
@@ -42,7 +42,7 @@ impl JsonGameResult {
                 .map(|ps| JsonPlayerResult {
                     id: ps.player_id,
                     score: ps.final_score,
-                    instructions: ps.total_instructions,
+                    fuel_consumed: ps.total_fuel_consumed,
                     eliminated_turn: ps.eliminated_turn,
                 })
                 .collect(),

@@ -11,14 +11,19 @@
 
 use ensi::tournament::{run_game, PlayerProgram, TournamentConfig};
 
-/// Load a bot ELF from the bots directory.
-fn load_bot(name: &str) -> Vec<u8> {
+/// Load the example bot WASM from the SDK directory.
+/// All test bots use the same WASM module for consistency.
+fn load_example_bot() -> Vec<u8> {
     let path = format!(
-        "{}/bots/{}.elf",
-        env!("CARGO_MANIFEST_DIR"),
-        name
+        "{}/sdk/example_bot.wasm",
+        env!("CARGO_MANIFEST_DIR")
     );
     std::fs::read(&path).unwrap_or_else(|e| panic!("Failed to load {}: {}", path, e))
+}
+
+/// Compatibility wrapper - all bots now use the same example_bot
+fn load_bot(_: &str) -> Vec<u8> {
+    load_example_bot()
 }
 
 #[test]

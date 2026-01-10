@@ -2,7 +2,7 @@
 //!
 //! Because Ensi games are 100% deterministic, replay requires only:
 //! - `seed: u64` - The random seed for map generation
-//! - `programs: Vec<Vec<u8>>` - ELF bytes for each player
+//! - `programs: Vec<Vec<u8>>` - WASM bytes for each player
 //!
 //! No state deltas needed. To view turn N, re-run the simulation from turn 0 to N.
 //!
@@ -18,17 +18,12 @@ mod text;
 pub use render::render_ascii;
 pub use text::render_llm;
 
-use crate::game::{GameState, PlayerId};
-use crate::tournament::{
-    generate_map, load_elf, ElfLoadError, MapGenError, PlayerProgram, TournamentConfig,
-};
-use crate::vm::{Cpu, Memory};
-use crate::game::{process_attack, Command, GameSyscallHandler, TileType};
-use crate::{MeteringConfig, Vm};
-use rayon::prelude::*;
+use crate::game::{process_attack, Command, GameState, PlayerId, TileType};
+use crate::tournament::{generate_map, MapGenError, PlayerProgram, TournamentConfig};
+use crate::wasm::{WasmBot, WasmError};
+use std::fs::File;
 use std::io::{self, Read as IoRead, Write as IoWrite};
 use std::path::Path;
-use std::fs::File;
 
 /// Minimal recording - just seed, programs, and config.
 ///
@@ -37,7 +32,7 @@ use std::fs::File;
 pub struct Recording {
     /// Random seed for map generation.
     pub seed: u64,
-    /// ELF bytes for each player.
+    /// WASM bytes for each player.
     pub programs: Vec<Vec<u8>>,
     /// Tournament configuration.
     pub config: TournamentConfig,
@@ -54,12 +49,12 @@ impl Recording {
         }
     }
 
-    /// Create from PlayerProgram slice (convenience).
+    /// Create from `PlayerProgram` slice (convenience).
     #[must_use]
     pub fn from_programs(seed: u64, programs: &[PlayerProgram], config: TournamentConfig) -> Self {
         Self {
             seed,
-            programs: programs.iter().map(|p| p.elf_bytes.clone()).collect(),
+            programs: programs.iter().map(|p| p.wasm_bytes.clone()).collect(),
             config,
         }
     }
@@ -71,8 +66,8 @@ impl Recording {
     /// - 4 bytes: num_programs (little-endian u32)
     /// - For each program:
     ///   - 4 bytes: program length (little-endian u32)
-    ///   - N bytes: program ELF bytes
-    /// - TournamentConfig (fixed size, just the raw bytes)
+    ///   - N bytes: program WASM bytes
+    /// - `TournamentConfig` fields
     ///
     /// # Errors
     ///
@@ -96,11 +91,9 @@ impl Recording {
             file.write_all(program)?;
         }
 
-        // Write config (each field separately for portability)
+        // Write config
         file.write_all(&self.config.max_turns.to_le_bytes())?;
-        file.write_all(&self.config.turn_budget.to_le_bytes())?;
-        file.write_all(&self.config.vm_memory_size.to_le_bytes())?;
-        file.write_all(&self.config.vm_memory_base.to_le_bytes())?;
+        file.write_all(&self.config.fuel_budget.to_le_bytes())?;
         file.write_all(&self.config.map_width.to_le_bytes())?;
         file.write_all(&self.config.map_height.to_le_bytes())?;
 
@@ -139,19 +132,14 @@ impl Recording {
 
         // Read config
         let mut u32_bytes = [0u8; 4];
+        let mut u64_bytes = [0u8; 8];
         let mut u16_bytes = [0u8; 2];
 
         file.read_exact(&mut u32_bytes)?;
         let max_turns = u32::from_le_bytes(u32_bytes);
 
-        file.read_exact(&mut u32_bytes)?;
-        let turn_budget = u32::from_le_bytes(u32_bytes);
-
-        file.read_exact(&mut u32_bytes)?;
-        let vm_memory_size = u32::from_le_bytes(u32_bytes);
-
-        file.read_exact(&mut u32_bytes)?;
-        let vm_memory_base = u32::from_le_bytes(u32_bytes);
+        file.read_exact(&mut u64_bytes)?;
+        let fuel_budget = u64::from_le_bytes(u64_bytes);
 
         file.read_exact(&mut u16_bytes)?;
         let map_width = u16::from_le_bytes(u16_bytes);
@@ -161,9 +149,7 @@ impl Recording {
 
         let config = TournamentConfig {
             max_turns,
-            turn_budget,
-            vm_memory_size,
-            vm_memory_base,
+            fuel_budget,
             map_width,
             map_height,
         };
@@ -177,14 +163,14 @@ impl Recording {
 }
 
 /// Error type for replay operations.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ReplayError {
-    /// Failed to load ELF for a player.
-    ElfLoadError {
+    /// Failed to load WASM for a player.
+    WasmLoadError {
         /// Which player (0-indexed).
         player: usize,
         /// Error details.
-        error: ElfLoadError,
+        error: WasmError,
     },
     /// Map generation failed.
     MapGenerationError(MapGenError),
@@ -197,55 +183,36 @@ pub enum ReplayError {
     },
     /// Game is already over.
     GameOver,
+    /// WASM engine error.
+    EngineError(WasmError),
 }
 
 impl std::fmt::Display for ReplayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ElfLoadError { player, error } => {
-                write!(f, "Failed to load ELF for player {player}: {error}")
+            Self::WasmLoadError { player, error } => {
+                write!(f, "Failed to load WASM for player {player}: {error}")
             }
             Self::MapGenerationError(e) => write!(f, "Map generation failed: {e}"),
             Self::TurnOutOfBounds { requested, max_turn } => {
                 write!(f, "Turn {requested} out of bounds (max: {max_turn})")
             }
             Self::GameOver => write!(f, "Game is already over"),
+            Self::EngineError(e) => write!(f, "WASM engine error: {e}"),
         }
     }
 }
 
 impl std::error::Error for ReplayError {}
 
-/// State for a single player's VM during replay.
-#[derive(Debug)]
-struct ReplayPlayerVm {
+/// State for a single player's WASM bot during replay.
+struct ReplayPlayerBot {
     /// Player identifier.
     player_id: PlayerId,
-    /// CPU state (registers + PC).
-    cpu: Cpu,
-    /// Memory state.
-    memory: Memory,
+    /// WASM bot instance.
+    bot: WasmBot,
     /// Whether this player has been eliminated.
     eliminated: bool,
-}
-
-impl ReplayPlayerVm {
-    /// Create a new ReplayPlayerVm from ELF bytes.
-    fn from_elf(
-        player_id: PlayerId,
-        elf_bytes: &[u8],
-        memory_size: u32,
-        memory_base: u32,
-    ) -> Result<Self, ElfLoadError> {
-        let (cpu, memory) = load_elf(elf_bytes, memory_size, memory_base)?;
-
-        Ok(Self {
-            player_id,
-            cpu,
-            memory,
-            eliminated: false,
-        })
-    }
 }
 
 /// Replay engine - steps through game deterministically.
@@ -254,16 +221,24 @@ impl ReplayPlayerVm {
 /// - Step forward by executing one turn
 /// - Step backward by replaying from turn 0
 /// - Jump to any turn by replaying from turn 0
-#[derive(Debug)]
 pub struct ReplayEngine {
     /// The recording being replayed.
     recording: Recording,
     /// Current game state.
     game_state: GameState,
-    /// Per-player VM states.
-    player_vms: Vec<ReplayPlayerVm>,
+    /// Per-player bot states.
+    player_bots: Vec<ReplayPlayerBot>,
     /// Current turn number.
     current_turn: u32,
+}
+
+impl std::fmt::Debug for ReplayEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplayEngine")
+            .field("current_turn", &self.current_turn)
+            .field("is_game_over", &self.game_state.is_game_over())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ReplayEngine {
@@ -271,7 +246,7 @@ impl ReplayEngine {
     ///
     /// # Errors
     ///
-    /// Returns an error if ELF loading or map generation fails.
+    /// Returns an error if WASM loading or map generation fails.
     pub fn new(recording: Recording) -> Result<Self, ReplayError> {
         Self::new_at_turn(recording, 0)
     }
@@ -282,8 +257,9 @@ impl ReplayEngine {
     ///
     /// # Errors
     ///
-    /// Returns an error if ELF loading or map generation fails.
+    /// Returns an error if WASM loading or map generation fails.
     pub fn new_at_turn(recording: Recording, target_turn: u32) -> Result<Self, ReplayError> {
+        let engine = WasmBot::create_engine().map_err(ReplayError::EngineError)?;
         let num_players = recording.programs.len();
         let config = &recording.config;
 
@@ -299,39 +275,44 @@ impl ReplayEngine {
         // Create game state
         let game_state = GameState::new(map, players, config.max_turns);
 
-        // Load player programs
-        let mut player_vms = Vec::with_capacity(num_players);
+        // Load player programs as WASM bots
+        let mut player_bots = Vec::with_capacity(num_players);
         for (i, program) in recording.programs.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             let player_id = (i + 1) as PlayerId;
 
-            let vm = ReplayPlayerVm::from_elf(
-                player_id,
+            let bot = WasmBot::from_bytes(
+                &engine,
                 program,
-                config.vm_memory_size,
-                config.vm_memory_base,
+                player_id,
+                config.map_width,
+                config.map_height,
             )
-            .map_err(|e| ReplayError::ElfLoadError { player: i, error: e })?;
+            .map_err(|e| ReplayError::WasmLoadError { player: i, error: e })?;
 
-            player_vms.push(vm);
+            player_bots.push(ReplayPlayerBot {
+                player_id,
+                bot,
+                eliminated: false,
+            });
         }
 
-        let mut engine = Self {
+        let mut replay_engine = Self {
             recording,
             game_state,
-            player_vms,
+            player_bots,
             current_turn: 0,
         };
 
         // Replay to target turn if needed
         for _ in 0..target_turn {
-            if engine.game_state.is_game_over() {
+            if replay_engine.game_state.is_game_over() {
                 break;
             }
-            engine.execute_turn_internal();
+            replay_engine.execute_turn_internal();
         }
 
-        Ok(engine)
+        Ok(replay_engine)
     }
 
     /// Get the recording.
@@ -406,8 +387,9 @@ impl ReplayEngine {
             });
         }
 
-        // Re-initialize from scratch
-        *self = Self::new_at_turn(self.recording.clone(), target_turn)?;
+        // Take the recording and create fresh state
+        let recording = self.recording.clone();
+        *self = Self::new_at_turn(recording, target_turn)?;
         Ok(())
     }
 
@@ -425,103 +407,58 @@ impl ReplayEngine {
 
     /// Execute a single turn (internal, no error handling).
     fn execute_turn_internal(&mut self) {
-        // Phase 1: Execute all VMs and collect commands
-        let turn_commands = self.execute_vms();
+        let fuel_budget = self.recording.config.fuel_budget;
+        let all_stats = self.game_state.compute_all_player_stats();
 
-        // Phase 2: Apply commands in deterministic order
-        self.apply_commands(turn_commands);
+        // Collect commands from all alive bots
+        let mut turn_commands: Vec<(PlayerId, Vec<Command>)> = Vec::new();
 
-        // Phase 3: Game state updates
-        self.game_state.process_combat();
-        self.game_state.process_economy();
-        self.game_state.check_eliminations();
+        for bot in &mut self.player_bots {
+            if bot.eliminated {
+                continue;
+            }
 
-        // Update eliminated status in VMs
-        for vm in &mut self.player_vms {
-            if !vm.eliminated {
-                let alive = self
-                    .game_state
-                    .get_player(vm.player_id)
-                    .map_or(false, |p| p.alive);
-                if !alive {
-                    vm.eliminated = true;
+            match bot.bot.run_turn(fuel_budget, &self.game_state, &all_stats) {
+                Ok((_, commands)) => {
+                    turn_commands.push((bot.player_id, commands));
+                }
+                Err(_) => {
+                    // Bot failed - no commands
+                    turn_commands.push((bot.player_id, Vec::new()));
                 }
             }
         }
 
-        // Phase 4: Advance turn
-        self.game_state.advance_turn();
-        self.current_turn += 1;
-    }
-
-    /// Execute all player VMs and collect commands.
-    fn execute_vms(&mut self) -> Vec<(PlayerId, Vec<Command>)> {
-        let turn_budget = self.recording.config.turn_budget;
-        // Immutable reference to game state - shared across all parallel VMs (no clone!)
-        let game_state = &self.game_state;
-
-        // Collect indices of alive players
-        let alive_indices: Vec<usize> = self
-            .player_vms
-            .iter()
-            .enumerate()
-            .filter(|(_, vm)| !vm.eliminated)
-            .map(|(i, _)| i)
-            .collect();
-
-        // Execute VMs in parallel
-        let results: Vec<(usize, PlayerId, Vec<Command>, Cpu, Memory)> = alive_indices
-            .into_par_iter()
-            .map(|idx| {
-                let vm = &self.player_vms[idx];
-                let player_id = vm.player_id;
-
-                // Create syscall handler with immutable reference (no lock!)
-                let handler = GameSyscallHandler::new(player_id, game_state);
-
-                // Create temporary VM
-                let mut temp_vm = Vm::from_parts(
-                    vm.cpu.clone(),
-                    vm.memory.clone(),
-                    handler,
-                    MeteringConfig::default(),
-                );
-
-                // Execute turn
-                let _ = temp_vm.run_turn(turn_budget);
-
-                // Extract state
-                let cpu = temp_vm.cpu.clone();
-                let memory = temp_vm.memory.clone();
-                // Replay is not hot path - OK to allocate here for simplicity
-                let commands = temp_vm.handler_ref().commands().to_vec();
-
-                (idx, player_id, commands, cpu, memory)
-            })
-            .collect();
-
-        // Update VM states and collect commands
-        let mut turn_commands = Vec::new();
-        for (idx, player_id, commands, cpu, memory) in results {
-            let vm = &mut self.player_vms[idx];
-            vm.cpu = cpu;
-            vm.memory = memory;
-            turn_commands.push((player_id, commands));
-        }
-
-        turn_commands
-    }
-
-    /// Apply commands in deterministic order.
-    fn apply_commands(&mut self, mut turn_commands: Vec<(PlayerId, Vec<Command>)>) {
-        // Sort by player_id for deterministic ordering
+        // Apply commands in deterministic order
         turn_commands.sort_by_key(|(pid, _)| *pid);
-
         for (player_id, commands) in turn_commands {
             for command in commands {
                 self.apply_command(player_id, command);
             }
         }
+
+        // Game state updates
+        self.game_state.process_combat();
+        self.game_state.process_economy();
+        let all_stats = self.game_state.compute_all_player_stats();
+        self.game_state.check_eliminations(&all_stats);
+
+        // Update eliminated status
+        for bot in &mut self.player_bots {
+            if !bot.eliminated {
+                let alive = self
+                    .game_state
+                    .get_player(bot.player_id)
+                    .map_or(false, |p| p.alive);
+                if !alive {
+                    bot.eliminated = true;
+                }
+            }
+        }
+
+        // Advance turn
+        self.game_state.advance_turn();
+        self.current_turn += 1;
     }
 
     /// Apply a single command.
@@ -535,7 +472,6 @@ impl ReplayEngine {
                     .map_or(false, |t| t.owner == Some(player_id) && t.army >= count);
 
                 if can_move {
-                    // process_attack handles deducting from source and combat resolution
                     process_attack(&mut self.game_state.map, from, to, count);
                 }
             }
@@ -561,7 +497,6 @@ impl ReplayEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tournament::TEXT_BASE;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -580,26 +515,23 @@ mod tests {
         let programs = vec![vec![1, 2, 3, 4, 5], vec![10, 20, 30]];
         let config = TournamentConfig {
             max_turns: 500,
-            turn_budget: 50_000,
-            vm_memory_size: 512 * 1024,
-            vm_memory_base: TEXT_BASE,
+            fuel_budget: 50_000,
             map_width: 32,
             map_height: 32,
         };
         let recording = Recording::new(123456789, programs.clone(), config);
 
         // Save to temp file
-        let temp_file = NamedTempFile::new().unwrap();
-        recording.save(temp_file.path()).unwrap();
+        let temp_file = NamedTempFile::new().expect("create temp file");
+        recording.save(temp_file.path()).expect("save recording");
 
         // Load back
-        let loaded = Recording::load(temp_file.path()).unwrap();
+        let loaded = Recording::load(temp_file.path()).expect("load recording");
 
         assert_eq!(loaded.seed, recording.seed);
         assert_eq!(loaded.programs, recording.programs);
         assert_eq!(loaded.config.max_turns, recording.config.max_turns);
-        assert_eq!(loaded.config.turn_budget, recording.config.turn_budget);
-        assert_eq!(loaded.config.vm_memory_size, recording.config.vm_memory_size);
+        assert_eq!(loaded.config.fuel_budget, recording.config.fuel_budget);
         assert_eq!(loaded.config.map_width, recording.config.map_width);
         assert_eq!(loaded.config.map_height, recording.config.map_height);
     }

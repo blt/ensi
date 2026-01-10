@@ -85,9 +85,3 @@ impl From<ensi::replay::ReplayError> for CliError {
         Self::new(e.to_string())
     }
 }
-
-impl From<ensi::tournament::ElfLoadError> for CliError {
-    fn from(e: ensi::tournament::ElfLoadError) -> Self {
-        Self::new(e.to_string())
-    }
-}

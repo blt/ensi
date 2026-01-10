@@ -2,7 +2,8 @@
 
 use super::output::{format_tournament_csv, format_tournament_text, JsonTournamentResult, TournamentStats};
 use super::{CliError, TournamentFormat};
-use ensi::tournament::{run_game, PlayerProgram, TournamentConfig};
+use ensi::tournament::{run_game_with_modules, CompiledProgram, PlayerProgram, TournamentConfig};
+use ensi::wasm::WasmBot;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fs;
@@ -19,18 +20,28 @@ pub(crate) fn execute(
     games: u64,
     seed: Option<u64>,
     threads: Option<usize>,
+    budget: Option<u32>,
+    max_turns: Option<u32>,
     format: TournamentFormat,
     progress: bool,
 ) -> Result<(), CliError> {
-    // Load bot programs
-    let mut programs = Vec::with_capacity(bots.len());
+    // Create shared wasmtime engine once
+    let engine = WasmBot::create_engine()
+        .map_err(|e| CliError::new(format!("Failed to create WASM engine: {e}")))?;
+
+    // Load and pre-compile bot programs (once, not per-game)
+    let mut compiled_modules: Vec<CompiledProgram> = Vec::with_capacity(bots.len());
     let mut bot_names = Vec::with_capacity(bots.len());
 
     for bot_path in &bots {
-        let elf_bytes = fs::read(bot_path).map_err(|e| {
+        let wasm_bytes = fs::read(bot_path).map_err(|e| {
             CliError::new(format!("Failed to read {}: {e}", bot_path.display()))
         })?;
-        programs.push(PlayerProgram::new(elf_bytes));
+        let program = PlayerProgram::new(wasm_bytes);
+        let compiled = program.compile(&engine).map_err(|e| {
+            CliError::new(format!("Failed to compile {}: {e}", bot_path.display()))
+        })?;
+        compiled_modules.push(compiled);
         bot_names.push(
             bot_path
                 .file_name()
@@ -57,7 +68,13 @@ pub(crate) fn execute(
     });
 
     // Config
-    let config = TournamentConfig::default();
+    let mut config = TournamentConfig::default();
+    if let Some(b) = budget {
+        config.fuel_budget = u64::from(b);
+    }
+    if let Some(t) = max_turns {
+        config.max_turns = t;
+    }
 
     // Progress bar
     let pb = if progress {
@@ -86,7 +103,8 @@ pub(crate) fn execute(
             |mut local_stats, i| {
                 let game_seed = base_seed.wrapping_add(i);
 
-                if let Ok(result) = run_game(game_seed, &programs, &config) {
+                // Use pre-compiled modules (no per-game compilation)
+                if let Ok(result) = run_game_with_modules(game_seed, &engine, &compiled_modules, &config) {
                     local_stats.add_result(&result);
                 }
 

@@ -3,41 +3,72 @@
 //! Provides a pure function interface: `(seed, programs) -> GameResult`
 //!
 //! The tournament runner handles:
-//! - ELF loading for player programs
+//! - WASM loading for player programs
 //! - Deterministic map generation
-//! - Parallel VM execution with rayon
+//! - Parallel bot execution with rayon
 //! - Command collection and sequential application
 //! - Game state updates (combat, economy, eliminations)
 
-mod elf;
 mod mapgen;
 
-pub use elf::{load_elf, ElfLoadError, STACK_TOP, TEXT_BASE};
 pub use mapgen::{generate_map, MapGenError};
 
 use crate::game::{
-    process_attack, Command, GameState, GameSyscallHandler, PlayerId, TileType,
-    MAX_COMMANDS_PER_TURN,
+    process_attack, Command, GameState, PlayerId, TileType, MAX_COMMANDS_PER_TURN,
 };
-use crate::vm::{Cpu, Memory};
-use crate::{MeteringConfig, TurnResult, Vm};
-use rayon::prelude::*;
+use crate::wasm::{WasmBot, WasmError, DEFAULT_FUEL_BUDGET};
+use crate::TurnResult;
+use wasmtime::{Engine, Module};
 
 /// Maximum number of players in a tournament.
 pub const MAX_PLAYERS: usize = 8;
 
-/// A player program as raw bytes.
+/// A player program as WASM bytes.
 #[derive(Debug, Clone)]
 pub struct PlayerProgram {
-    /// Raw ELF bytes for the program.
-    pub elf_bytes: Vec<u8>,
+    /// Raw WASM bytes for the program.
+    pub wasm_bytes: Vec<u8>,
 }
 
 impl PlayerProgram {
-    /// Create a new player program from ELF bytes.
+    /// Create a new player program from WASM bytes.
     #[must_use]
-    pub fn new(elf_bytes: Vec<u8>) -> Self {
-        Self { elf_bytes }
+    pub fn new(wasm_bytes: Vec<u8>) -> Self {
+        Self { wasm_bytes }
+    }
+
+    /// Compile this program into a reusable module.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if WASM compilation fails.
+    pub fn compile(&self, engine: &Engine) -> Result<CompiledProgram, WasmError> {
+        let module = Module::new(engine, &self.wasm_bytes)?;
+        Ok(CompiledProgram { module })
+    }
+}
+
+/// A pre-compiled WASM program.
+///
+/// Compiling WASM is expensive (~3% of CPU per-game). Pre-compile programs
+/// once at tournament start, then reuse across many games.
+#[derive(Clone)]
+pub struct CompiledProgram {
+    /// The compiled wasmtime module.
+    module: Module,
+}
+
+impl std::fmt::Debug for CompiledProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledProgram").finish_non_exhaustive()
+    }
+}
+
+impl CompiledProgram {
+    /// Get a reference to the compiled module.
+    #[must_use]
+    pub fn module(&self) -> &Module {
+        &self.module
     }
 }
 
@@ -46,12 +77,8 @@ impl PlayerProgram {
 pub struct TournamentConfig {
     /// Maximum turns before game ends.
     pub max_turns: u32,
-    /// Instruction budget per turn per player.
-    pub turn_budget: u32,
-    /// Memory size for each VM (bytes).
-    pub vm_memory_size: u32,
-    /// Memory base address.
-    pub vm_memory_base: u32,
+    /// Fuel budget per turn per player.
+    pub fuel_budget: u64,
     /// Map width.
     pub map_width: u16,
     /// Map height.
@@ -62,9 +89,7 @@ impl Default for TournamentConfig {
     fn default() -> Self {
         Self {
             max_turns: 1000,
-            turn_budget: 100_000,
-            vm_memory_size: 1024 * 1024, // 1 MiB
-            vm_memory_base: TEXT_BASE,
+            fuel_budget: DEFAULT_FUEL_BUDGET,
             map_width: 64,
             map_height: 64,
         }
@@ -76,9 +101,9 @@ impl Default for TournamentConfig {
 pub struct PlayerStats {
     /// Player identifier.
     pub player_id: PlayerId,
-    /// Total instructions executed across all turns.
-    pub total_instructions: u64,
-    /// Number of turns where the VM trapped.
+    /// Total fuel consumed across all turns.
+    pub total_fuel_consumed: u64,
+    /// Number of turns where the bot trapped.
     pub trap_count: u32,
     /// Turn the player was eliminated (None if survived).
     pub eliminated_turn: Option<u32>,
@@ -104,21 +129,23 @@ pub struct GameResult {
 }
 
 /// Error type for tournament operations.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TournamentError {
     /// Not enough players (minimum 2).
     TooFewPlayers(usize),
     /// Too many players (maximum 8).
     TooManyPlayers(usize),
-    /// Failed to load ELF for a player.
-    ElfLoadError {
+    /// Failed to load WASM for a player.
+    WasmLoadError {
         /// Which player (0-indexed).
         player: usize,
         /// Error details.
-        error: ElfLoadError,
+        error: WasmError,
     },
     /// Map generation failed.
     MapGenerationError(MapGenError),
+    /// WASM engine creation failed.
+    EngineError(WasmError),
 }
 
 impl std::fmt::Display for TournamentError {
@@ -126,58 +153,34 @@ impl std::fmt::Display for TournamentError {
         match self {
             Self::TooFewPlayers(n) => write!(f, "Too few players: {n} (minimum 2)"),
             Self::TooManyPlayers(n) => write!(f, "Too many players: {n} (maximum 8)"),
-            Self::ElfLoadError { player, error } => {
-                write!(f, "Failed to load ELF for player {player}: {error}")
+            Self::WasmLoadError { player, error } => {
+                write!(f, "Failed to load WASM for player {player}: {error}")
             }
             Self::MapGenerationError(e) => write!(f, "Map generation failed: {e}"),
+            Self::EngineError(e) => write!(f, "WASM engine error: {e}"),
         }
     }
 }
 
 impl std::error::Error for TournamentError {}
 
-/// State for a single player's VM that persists across turns.
-struct PlayerVm {
+/// State for a single player's WASM bot.
+struct PlayerBot {
     /// Player identifier.
     player_id: PlayerId,
-    /// CPU state (registers + PC).
-    cpu: Cpu,
-    /// Memory state.
-    memory: Memory,
+    /// WASM bot instance.
+    bot: WasmBot,
     /// Whether this player has been eliminated.
     eliminated: bool,
-    /// Total instructions executed.
-    total_instructions: u64,
+    /// Total fuel consumed.
+    total_fuel_consumed: u64,
     /// Number of traps encountered.
     trap_count: u32,
     /// Turn when eliminated.
     eliminated_turn: Option<u32>,
 }
 
-impl PlayerVm {
-    /// Create a new `PlayerVm` from an ELF program.
-    fn from_elf(
-        player_id: PlayerId,
-        elf_bytes: &[u8],
-        memory_size: u32,
-        memory_base: u32,
-    ) -> Result<Self, ElfLoadError> {
-        let (cpu, memory) = load_elf(elf_bytes, memory_size, memory_base)?;
-
-        Ok(Self {
-            player_id,
-            cpu,
-            memory,
-            eliminated: false,
-            total_instructions: 0,
-            trap_count: 0,
-            eliminated_turn: None,
-        })
-    }
-}
-
 /// Collected commands from a single player's turn.
-/// Uses fixed-size array to avoid heap allocations.
 #[derive(Clone, Copy)]
 struct TurnCommands {
     /// Player identifier.
@@ -186,11 +189,6 @@ struct TurnCommands {
     commands: [Command; MAX_COMMANDS_PER_TURN],
     /// Number of valid commands.
     command_count: u16,
-    /// Whether the player yielded.
-    #[allow(dead_code)]
-    yielded: bool,
-    /// Whether a trap occurred.
-    trapped: bool,
 }
 
 impl TurnCommands {
@@ -207,8 +205,8 @@ impl TurnCommands {
 ///
 /// # Arguments
 ///
-/// * `seed` - Random seed for deterministic map generation and any RNG
-/// * `programs` - ELF programs for each player (2-8 players)
+/// * `seed` - Random seed for deterministic map generation
+/// * `programs` - WASM programs for each player (2-8 players)
 /// * `config` - Tournament configuration
 ///
 /// # Determinism
@@ -220,14 +218,43 @@ impl TurnCommands {
 ///
 /// Returns an error if:
 /// - Number of players is outside valid range (2-8)
-/// - Any ELF program fails to load
+/// - Any WASM program fails to load
 /// - Map generation fails
 pub fn run_game(
     seed: u64,
     programs: &[PlayerProgram],
     config: &TournamentConfig,
 ) -> Result<GameResult, TournamentError> {
-    let runner = GameRunner::new(seed, programs, config)?;
+    let engine = WasmBot::create_engine().map_err(TournamentError::EngineError)?;
+    let runner = GameRunner::new_from_bytes(seed, programs, config, &engine)?;
+    runner.run()
+}
+
+/// Run a complete game using pre-compiled WASM modules.
+///
+/// This is faster than `run_game` because it skips WASM compilation.
+/// Use this when running many games with the same bot programs.
+///
+/// # Arguments
+///
+/// * `seed` - Random seed for deterministic map generation
+/// * `engine` - Pre-created wasmtime engine
+/// * `modules` - Pre-compiled WASM modules for each player (2-8 players)
+/// * `config` - Tournament configuration
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Number of players is outside valid range (2-8)
+/// - Bot instantiation fails
+/// - Map generation fails
+pub fn run_game_with_modules(
+    seed: u64,
+    engine: &Engine,
+    modules: &[CompiledProgram],
+    config: &TournamentConfig,
+) -> Result<GameResult, TournamentError> {
+    let runner = GameRunner::new_from_modules(seed, engine, modules, config)?;
     runner.run()
 }
 
@@ -235,8 +262,8 @@ pub fn run_game(
 struct GameRunner {
     /// Game state.
     game_state: GameState,
-    /// Per-player VM states.
-    player_vms: Vec<PlayerVm>,
+    /// Per-player bot states.
+    player_bots: Vec<PlayerBot>,
     /// Configuration.
     config: TournamentConfig,
     /// Original seed.
@@ -246,11 +273,12 @@ struct GameRunner {
 }
 
 impl GameRunner {
-    /// Create a new game runner.
-    fn new(
+    /// Create a new game runner from raw WASM bytes.
+    fn new_from_bytes(
         seed: u64,
         programs: &[PlayerProgram],
         config: &TournamentConfig,
+        engine: &Engine,
     ) -> Result<Self, TournamentError> {
         let num_players = programs.len();
 
@@ -262,33 +290,99 @@ impl GameRunner {
         }
 
         // Generate map
-        let (map, players) =
-            generate_map(seed, config.map_width, config.map_height, num_players)
-                .map_err(TournamentError::MapGenerationError)?;
+        let (map, players) = generate_map(seed, config.map_width, config.map_height, num_players)
+            .map_err(TournamentError::MapGenerationError)?;
 
         // Create game state
         let game_state = GameState::new(map, players, config.max_turns);
 
-        // Load player programs
-        let mut player_vms = Vec::with_capacity(num_players);
+        // Load player programs as WASM bots (compiles each module)
+        let mut player_bots = Vec::with_capacity(num_players);
         for (i, program) in programs.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             let player_id = (i + 1) as PlayerId;
 
-            let vm = PlayerVm::from_elf(
+            let bot = WasmBot::from_bytes(
+                engine,
+                &program.wasm_bytes,
                 player_id,
-                &program.elf_bytes,
-                config.vm_memory_size,
-                config.vm_memory_base,
+                config.map_width,
+                config.map_height,
             )
-            .map_err(|e| TournamentError::ElfLoadError { player: i, error: e })?;
+            .map_err(|e| TournamentError::WasmLoadError { player: i, error: e })?;
 
-            player_vms.push(vm);
+            player_bots.push(PlayerBot {
+                player_id,
+                bot,
+                eliminated: false,
+                total_fuel_consumed: 0,
+                trap_count: 0,
+                eliminated_turn: None,
+            });
         }
 
         Ok(Self {
             game_state,
-            player_vms,
+            player_bots,
+            config: *config,
+            seed,
+            elimination_order: Vec::new(),
+        })
+    }
+
+    /// Create a new game runner from pre-compiled WASM modules.
+    ///
+    /// This is faster than `new_from_bytes` because it skips WASM compilation.
+    fn new_from_modules(
+        seed: u64,
+        engine: &Engine,
+        modules: &[CompiledProgram],
+        config: &TournamentConfig,
+    ) -> Result<Self, TournamentError> {
+        let num_players = modules.len();
+
+        if num_players < 2 {
+            return Err(TournamentError::TooFewPlayers(num_players));
+        }
+        if num_players > 8 {
+            return Err(TournamentError::TooManyPlayers(num_players));
+        }
+
+        // Generate map
+        let (map, players) = generate_map(seed, config.map_width, config.map_height, num_players)
+            .map_err(TournamentError::MapGenerationError)?;
+
+        // Create game state
+        let game_state = GameState::new(map, players, config.max_turns);
+
+        // Instantiate player bots from pre-compiled modules (no compilation)
+        let mut player_bots = Vec::with_capacity(num_players);
+        for (i, compiled) in modules.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let player_id = (i + 1) as PlayerId;
+
+            let bot = WasmBot::from_module(
+                engine,
+                compiled.module(),
+                player_id,
+                config.map_width,
+                config.map_height,
+            )
+            .map_err(|e| TournamentError::WasmLoadError { player: i, error: e })?;
+
+            player_bots.push(PlayerBot {
+                player_id,
+                bot,
+                eliminated: false,
+                total_fuel_consumed: 0,
+                trap_count: 0,
+                eliminated_turn: None,
+            });
+        }
+
+        Ok(Self {
+            game_state,
+            player_bots,
             config: *config,
             seed,
             elimination_order: Vec::new(),
@@ -308,8 +402,8 @@ impl GameRunner {
     fn execute_turn(&mut self) {
         let turn = self.game_state.turn();
 
-        // Phase 1: Execute all VMs (parallel or sequential based on alive count)
-        let turn_commands = self.execute_vms();
+        // Phase 1: Execute all bots and collect commands
+        let turn_commands = self.execute_bots();
 
         // Phase 2: Sequential command application (deterministic ordering)
         self.apply_commands_sequential(turn_commands);
@@ -317,7 +411,10 @@ impl GameRunner {
         // Phase 3: Game state updates
         self.game_state.process_combat();
         self.game_state.process_economy();
-        self.game_state.check_eliminations();
+
+        // Compute stats after combat/economy for elimination check
+        let all_stats = self.game_state.compute_all_player_stats();
+        self.game_state.check_eliminations(&all_stats);
 
         // Track eliminations this turn
         self.update_eliminations(turn);
@@ -326,80 +423,62 @@ impl GameRunner {
         self.game_state.advance_turn();
     }
 
-    /// Execute all player VMs and collect commands.
-    fn execute_vms(&mut self) -> Vec<TurnCommands> {
-        let turn_budget = self.config.turn_budget;
-        // Immutable reference to game state - shared across all parallel VMs (no clone!)
+    /// Execute all player bots and collect commands.
+    fn execute_bots(&mut self) -> Vec<TurnCommands> {
+        let fuel_budget = self.config.fuel_budget;
         let game_state = &self.game_state;
 
-        // PHASE 1: Take ownership of CPU/Memory from alive players (sequential)
-        // This avoids cloning 1MB Memory per player per turn!
-        let owned_states: Vec<(usize, PlayerId, Cpu, Memory)> = self
-            .player_vms
-            .iter_mut()
-            .enumerate()
-            .filter(|(_, vm)| !vm.eliminated)
-            .map(|(idx, vm)| {
-                // Take ownership - replace with empty placeholder
-                let cpu = std::mem::take(&mut vm.cpu);
-                let base = vm.memory.base();
-                let memory = std::mem::replace(&mut vm.memory, Memory::new(0, base));
-                (idx, vm.player_id, cpu, memory)
-            })
-            .collect();
+        // Pre-compute all player stats once for this turn
+        let all_stats = game_state.compute_all_player_stats();
 
-        // PHASE 2: Execute VMs in parallel (owned data, no cloning!)
-        let results: Vec<(usize, TurnCommands, Cpu, Memory, u64)> = owned_states
-            .into_par_iter()
-            .map(|(idx, player_id, cpu, memory)| {
-                // Create syscall handler with immutable reference to game state (no lock!)
-                let handler = GameSyscallHandler::new(player_id, game_state);
+        // Execute each alive bot and collect results
+        let mut turn_commands_vec = Vec::new();
 
-                // Create VM with owned (not cloned!) components
-                let mut temp_vm = Vm::from_parts(
-                    cpu,
-                    memory,
-                    handler,
-                    MeteringConfig::default(),
-                );
-
-                // Execute turn
-                let turn_result = temp_vm.run_turn(turn_budget);
-                let trapped = matches!(turn_result, TurnResult::Trap(_));
-
-                // Decompose VM to get parts back without cloning
-                let (cpu, memory, handler, instructions) = temp_vm.into_parts();
-
-                // Extract command data from handler
-                let yielded = handler.has_yielded();
-                let command_count = handler.command_count();
-                let mut commands = [Command::Yield; MAX_COMMANDS_PER_TURN];
-                let src_commands = handler.commands();
-                commands[..src_commands.len()].copy_from_slice(src_commands);
-
-                let turn_commands = TurnCommands {
-                    player_id,
-                    commands,
-                    command_count,
-                    yielded,
-                    trapped,
-                };
-
-                (idx, turn_commands, cpu, memory, instructions)
-            })
-            .collect();
-
-        // PHASE 3: Write back CPU/Memory states (sequential)
-        let mut turn_commands_vec = Vec::with_capacity(results.len());
-        for (idx, turn_commands, cpu, memory, instructions) in results {
-            let vm = &mut self.player_vms[idx];
-            vm.cpu = cpu;
-            vm.memory = memory;
-            vm.total_instructions += instructions;
-            if turn_commands.trapped {
-                vm.trap_count += 1;
+        for player_bot in &mut self.player_bots {
+            if player_bot.eliminated {
+                continue;
             }
-            turn_commands_vec.push(turn_commands);
+
+            // Run the bot
+            let result = player_bot.bot.run_turn(fuel_budget, game_state, &all_stats);
+
+            match result {
+                Ok((turn_result, commands)) => {
+                    let trapped = matches!(turn_result, TurnResult::Trap(_));
+                    let fuel_consumed = match turn_result {
+                        TurnResult::BudgetExhausted { remaining } => {
+                            fuel_budget.saturating_sub(u64::from(remaining))
+                        }
+                        TurnResult::Trap(_) => fuel_budget,
+                    };
+
+                    // Copy commands to fixed array
+                    let mut cmd_array = [Command::Yield; MAX_COMMANDS_PER_TURN];
+                    let cmd_count = commands.len().min(MAX_COMMANDS_PER_TURN);
+                    cmd_array[..cmd_count].copy_from_slice(&commands[..cmd_count]);
+
+                    turn_commands_vec.push(TurnCommands {
+                        player_id: player_bot.player_id,
+                        commands: cmd_array,
+                        command_count: cmd_count as u16,
+                    });
+
+                    player_bot.total_fuel_consumed += fuel_consumed;
+                    if trapped {
+                        player_bot.trap_count += 1;
+                    }
+                }
+                Err(_) => {
+                    // Bot execution failed - treat as trap
+                    turn_commands_vec.push(TurnCommands {
+                        player_id: player_bot.player_id,
+                        commands: [Command::Yield; MAX_COMMANDS_PER_TURN],
+                        command_count: 0,
+                    });
+                    player_bot.trap_count += 1;
+                    player_bot.total_fuel_consumed += fuel_budget;
+                }
+            }
         }
 
         turn_commands_vec
@@ -429,7 +508,6 @@ impl GameRunner {
                     .map_or(false, |t| t.owner == Some(player_id) && t.army >= count);
 
                 if can_move {
-                    // process_attack handles deducting from source and combat resolution
                     process_attack(&mut self.game_state.map, from, to, count);
                 }
             }
@@ -455,21 +533,21 @@ impl GameRunner {
 
     /// Update elimination tracking after game state changes.
     fn update_eliminations(&mut self, turn: u32) {
-        for vm in &mut self.player_vms {
-            if vm.eliminated {
+        for bot in &mut self.player_bots {
+            if bot.eliminated {
                 continue;
             }
 
             // Check if player is now dead
             let player_alive = self
                 .game_state
-                .get_player(vm.player_id)
+                .get_player(bot.player_id)
                 .map_or(false, |p| p.alive);
 
             if !player_alive {
-                vm.eliminated = true;
-                vm.eliminated_turn = Some(turn);
-                self.elimination_order.push(vm.player_id);
+                bot.eliminated = true;
+                bot.eliminated_turn = Some(turn);
+                self.elimination_order.push(bot.player_id);
             }
         }
     }
@@ -478,36 +556,38 @@ impl GameRunner {
     fn build_result(self) -> GameResult {
         // Calculate final scores
         let scores: Vec<f64> = self
-            .player_vms
+            .player_bots
             .iter()
-            .map(|vm| self.game_state.calculate_score(vm.player_id))
+            .map(|bot| self.game_state.calculate_score(bot.player_id))
             .collect();
 
         // Build player stats
         let player_stats: Vec<PlayerStats> = self
-            .player_vms
+            .player_bots
             .iter()
             .enumerate()
-            .map(|(i, vm)| PlayerStats {
-                player_id: vm.player_id,
-                total_instructions: vm.total_instructions,
-                trap_count: vm.trap_count,
-                eliminated_turn: vm.eliminated_turn,
+            .map(|(i, bot)| PlayerStats {
+                player_id: bot.player_id,
+                total_fuel_consumed: bot.total_fuel_consumed,
+                trap_count: bot.trap_count,
+                eliminated_turn: bot.eliminated_turn,
                 final_score: scores[i],
             })
             .collect();
 
-        // Determine winner (highest score among alive players, or highest score overall)
+        // Determine winner (highest score among alive players)
         let winner = self
-            .player_vms
+            .player_bots
             .iter()
-            .filter(|vm| !vm.eliminated)
+            .filter(|bot| !bot.eliminated)
             .max_by(|a, b| {
                 let score_a = self.game_state.calculate_score(a.player_id);
                 let score_b = self.game_state.calculate_score(b.player_id);
-                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+                score_a
+                    .partial_cmp(&score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .map(|vm| vm.player_id);
+            .map(|bot| bot.player_id);
 
         GameResult {
             winner,
@@ -524,10 +604,6 @@ impl GameRunner {
 mod tests {
     use super::*;
 
-    // A minimal RISC-V program that just yields immediately
-    // This is a hand-crafted ELF that we can use for testing
-    // For now, we'll test with invalid ELF to verify error handling
-
     #[test]
     fn test_tournament_error_display() {
         let err = TournamentError::TooFewPlayers(1);
@@ -541,7 +617,7 @@ mod tests {
     fn test_tournament_config_default() {
         let config = TournamentConfig::default();
         assert_eq!(config.max_turns, 1000);
-        assert_eq!(config.turn_budget, 100_000);
+        assert_eq!(config.fuel_budget, DEFAULT_FUEL_BUDGET);
         assert_eq!(config.map_width, 64);
         assert_eq!(config.map_height, 64);
     }
@@ -560,19 +636,5 @@ mod tests {
         let config = TournamentConfig::default();
         let result = run_game(42, &programs, &config);
         assert!(matches!(result, Err(TournamentError::TooManyPlayers(9))));
-    }
-
-    #[test]
-    fn test_run_game_invalid_elf() {
-        let programs = vec![
-            PlayerProgram::new(vec![0, 1, 2, 3]),
-            PlayerProgram::new(vec![0, 1, 2, 3]),
-        ];
-        let config = TournamentConfig::default();
-        let result = run_game(42, &programs, &config);
-        assert!(matches!(
-            result,
-            Err(TournamentError::ElfLoadError { player: 0, .. })
-        ));
     }
 }

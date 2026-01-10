@@ -270,6 +270,8 @@ struct GameRunner {
     seed: u64,
     /// Elimination order tracking.
     elimination_order: Vec<PlayerId>,
+    /// Cached player stats from end of previous turn (avoids recomputation).
+    cached_stats: Option<crate::game::AllPlayerStats>,
 }
 
 impl GameRunner {
@@ -327,6 +329,7 @@ impl GameRunner {
             config: *config,
             seed,
             elimination_order: Vec::new(),
+            cached_stats: None,
         })
     }
 
@@ -386,6 +389,7 @@ impl GameRunner {
             config: *config,
             seed,
             elimination_order: Vec::new(),
+            cached_stats: None,
         })
     }
 
@@ -413,8 +417,10 @@ impl GameRunner {
         self.game_state.process_economy();
 
         // Compute stats after combat/economy for elimination check
+        // Cache these for next turn's execute_bots (avoids duplicate computation)
         let all_stats = self.game_state.compute_all_player_stats();
         self.game_state.check_eliminations(&all_stats);
+        self.cached_stats = Some(all_stats);
 
         // Track eliminations this turn
         self.update_eliminations(turn);
@@ -428,8 +434,10 @@ impl GameRunner {
         let fuel_budget = self.config.fuel_budget;
         let game_state = &self.game_state;
 
-        // Pre-compute all player stats once for this turn
-        let all_stats = game_state.compute_all_player_stats();
+        // Use cached stats from end of previous turn, or compute if first turn
+        let all_stats = self.cached_stats.take().unwrap_or_else(|| {
+            game_state.compute_all_player_stats()
+        });
 
         // Execute each alive bot and collect results
         let mut turn_commands_vec = Vec::new();

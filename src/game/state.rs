@@ -1,8 +1,7 @@
 //! Game state management.
 
 use crate::game::{
-    apply_economy, calculate_food_balance, resolve_combat, Coord, FoodBalance, Map, Player,
-    PlayerId, TileType,
+    apply_economy, calculate_food_balance, Coord, FoodBalance, Map, Player, PlayerId, TileType,
 };
 
 /// Maximum number of players in a game.
@@ -237,8 +236,14 @@ impl GameState {
     }
 
     /// Process combat on all tiles.
+    ///
+    /// NOTE: Combat is now fully resolved during `process_attack()` in the
+    /// command application phase. This function is retained for API compatibility
+    /// but is a no-op. The old `resolve_combat()` iterated all tiles but did
+    /// nothing useful (had dead code due to early return on army == 0).
+    #[inline]
     pub fn process_combat(&mut self) {
-        resolve_combat(&mut self.map);
+        // No-op: combat is resolved in process_attack() during command application
     }
 
     /// Advance to the next turn.

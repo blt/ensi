@@ -178,6 +178,15 @@ impl Map {
         &self.tiles
     }
 
+    /// Get a mutable reference to the raw tiles slice for efficient iteration.
+    ///
+    /// Use this when you need direct index-based mutation without coord overhead.
+    #[must_use]
+    #[inline]
+    pub fn tiles_mut(&mut self) -> &mut [Tile] {
+        &mut self.tiles
+    }
+
     /// Check if a coordinate is within the map bounds.
     #[must_use]
     pub const fn in_bounds(&self, coord: Coord) -> bool {

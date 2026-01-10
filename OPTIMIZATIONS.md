@@ -90,3 +90,33 @@ If more performance is needed:
 |------|--------------|--------|-------|-------------|
 | 2026-01-10 | Baseline | 314-335/s | - | - |
 | 2026-01-10 | Direct tile iteration | 314-335/s | 484-508/s | +50% |
+| 2026-01-10 | Stats caching (eliminate dup compute) | 484-508/s | 621-650/s | +28% |
+| 2026-01-10 | Economy merge | 621-650/s | 559-591/s | **-10% REJECTED** |
+| 2026-01-10 | Dead resolve_combat removal | 621-650/s | 626-647/s | ~0% (cleaner) |
+| 2026-01-10 | Linker caching | 626-647/s | 584-604/s | **-8% REJECTED** |
+
+---
+
+## Current Status (After All Optimizations)
+
+- **Performance: 610-632 games/sec** (80-83% of physics limit)
+- **Total improvement: +90% from baseline** (314-335 → 610-632)
+
+### What Worked (Round 1 + 2):
+1. Direct tile iteration: +50% - avoiding div/mod for coord computation
+2. Stats caching: +28% - eliminate duplicate `compute_all_player_stats` call per turn
+3. Dead code removal: ~0% - removed no-op `resolve_combat` (cleaner, no perf change)
+
+### What Failed (Round 1 + 2):
+1. Inline visibility: -57% - neighbor lookups too expensive for fog tiles
+2. Persistent bitmap + fill: -16% - fill() slower than vec! allocation
+3. Generation counter: -2% - 4x memory bandwidth vs bool
+4. Unsafe writes: 0% - compiler already optimizes copy_from_slice
+5. **Economy merge: -10%** - merging iterations somehow regressed perf (cache effects?)
+6. **Linker caching: -8%** - sharing Linker across bots caused regression
+
+### Key Insight from Failures:
+"Obvious" optimizations often backfire:
+- Reusing buffers can be slower than fresh allocation (allocators are smart)
+- Merging loops can hurt branch prediction or cache locality
+- Sharing objects across threads/instances has hidden synchronization costs

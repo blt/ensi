@@ -169,6 +169,15 @@ impl Map {
         self.height
     }
 
+    /// Get a reference to the raw tiles slice for efficient iteration.
+    ///
+    /// Use this when you don't need coordinates, just the tiles in row-major order.
+    #[must_use]
+    #[inline]
+    pub fn tiles(&self) -> &[Tile] {
+        &self.tiles
+    }
+
     /// Check if a coordinate is within the map bounds.
     #[must_use]
     pub const fn in_bounds(&self, coord: Coord) -> bool {

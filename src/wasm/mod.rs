@@ -474,22 +474,29 @@ impl WasmBot {
         mem_data[header_offset + 14..header_offset + 16].copy_from_slice(&0u16.to_le_bytes());
 
         // Pre-compute visibility: owned tiles and their neighbors
+        // Optimized: iterate tiles directly, compute coord only for owned tiles
         let mut visible = vec![false; num_tiles];
-        for (idx, (coord, tile)) in game_state.map.iter().enumerate() {
+        let tiles = game_state.map.tiles();
+        let width_usize = usize::from(width);
+        for (idx, tile) in tiles.iter().enumerate() {
             if tile.owner == Some(player_id) {
-                // Mark this tile and all adjacent as visible
+                // Mark this tile as visible
                 visible[idx] = true;
+                // Compute coord only for owned tiles (lazy)
+                let x = (idx % width_usize) as u16;
+                let y = (idx / width_usize) as u16;
+                let coord = Coord::new(x, y);
                 let (adjacent, count) = coord.adjacent(width, height);
                 for adj in &adjacent[..count as usize] {
-                    let adj_idx = usize::from(adj.y) * usize::from(width) + usize::from(adj.x);
+                    let adj_idx = usize::from(adj.y) * width_usize + usize::from(adj.x);
                     visible[adj_idx] = true;
                 }
             }
         }
 
-        // Write tiles
+        // Write tiles - direct slice access, no coord computation
         let tiles_offset = TILE_MAP_BASE_ADDR + TILE_MAP_HEADER_SIZE;
-        for (idx, (_, tile)) in game_state.map.iter().enumerate() {
+        for (idx, tile) in tiles.iter().enumerate() {
             let packed: u32 = if visible[idx] {
                 let tile_type = match tile.tile_type {
                     TileType::City => 0u8,

@@ -96,6 +96,44 @@ If more performance is needed:
 | 2026-01-10 | Linker caching | 626-647/s | 584-604/s | **-8% REJECTED** |
 | 2026-01-10 | tiles() in compute_all_player_stats | 598-634/s | 405-499/s | **-25% REJECTED** |
 | 2026-01-10 | Fast adjacency (Manhattan distance) | 598-634/s | 576-630/s | ~0% (neutral) |
+| 2026-01-10 | **Parallel bot execution (rayon)** | ~638/s | ~430/s | **-33% REJECTED** |
+
+---
+
+## Round 4: Architectural Changes (2026-01-10)
+
+Spawned debate agents for 8 architectural optimizations. Results:
+
+| Optimization | Verdict | Reason |
+|--------------|---------|--------|
+| Parallel bot execution | **TESTED & REJECTED** | -33% regression, thread overhead > bot execution (~388ns/turn) |
+| SIMD map iteration | Skip | Tile layout not SIMD-friendly, 0-5% expected gain |
+| SoA tile layout | Skip | High refactoring cost, mixed results expected |
+| Batch syscalls | Skip | Already solved by push-based visibility map |
+| Arena allocator | Skip | Would likely regress (allocators are smart) |
+| Pre-compiled WASM | Already done | Implemented in tournament CLI |
+| Incremental visibility | Cautious | High regression risk, not pursued |
+| Winch baseline JIT | Possible | Now supports fuel, but slower execution |
+
+### Parallel Bot Execution Analysis
+
+Converted `for player_bot in &mut self.player_bots` to `par_iter_mut().filter_map(...).collect()`:
+
+```rust
+// Before: sequential
+for player_bot in &mut self.player_bots { ... }
+
+// After: parallel with rayon
+self.player_bots.par_iter_mut().filter_map(|player_bot| { ... }).collect()
+```
+
+**Result: 33% regression** (638 → 430 games/sec)
+
+**Why it failed:**
+- Each bot turn takes only ~388 nanoseconds (200 games × 1000 turns × 4 bots = 800k executions in 0.31s)
+- Thread scheduling overhead (~1-10μs) exceeds work per task by 25-250x
+- No parallelism benefit when individual tasks are sub-microsecond
+- Only beneficial if bots do significant computation (complex AI, pathfinding, etc.)
 
 ---
 
@@ -109,7 +147,7 @@ If more performance is needed:
 2. Stats caching: +28% - eliminate duplicate `compute_all_player_stats` call per turn
 3. Dead code removal: ~0% - removed no-op `resolve_combat` (cleaner, no perf change)
 
-### What Failed (Round 1 + 2 + 3):
+### What Failed (Round 1 + 2 + 3 + 4):
 1. Inline visibility: -57% - neighbor lookups too expensive for fog tiles
 2. Persistent bitmap + fill: -16% - fill() slower than vec! allocation
 3. Generation counter: -2% - 4x memory bandwidth vs bool
@@ -118,6 +156,7 @@ If more performance is needed:
 6. **Linker caching: -8%** - sharing Linker across bots caused regression
 7. **tiles() instead of iter(): -25%** - counter-intuitive! Iterator with enumerate().map() optimizes better than direct slice iteration for `for (_, tile)` patterns
 8. Fast adjacency (Manhattan): ~0% - no improvement, likely not in hot path
+9. **Parallel bot execution (rayon): -33%** - thread scheduling overhead exceeds sub-μs bot execution time
 
 ### Key Insight from Failures:
 "Obvious" optimizations often backfire:

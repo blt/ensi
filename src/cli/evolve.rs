@@ -15,7 +15,15 @@ pub(crate) fn execute(
     seed: Option<u64>,
     resume: Option<PathBuf>,
     verbose: bool,
+    jobs: Option<usize>,
 ) -> Result<(), CliError> {
+    // Configure rayon thread pool if jobs limit specified
+    if let Some(num_threads) = jobs {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global()
+            .map_err(|e| CliError::new(format!("Failed to configure thread pool: {e}")))?;
+    }
     // Build configuration
     let config = EvolutionConfig {
         population_size: population,
@@ -59,6 +67,11 @@ pub(crate) fn execute(
             println!("  Generations: {generations}");
         }
         println!("  Games per eval: {games}");
+        if let Some(j) = jobs {
+            println!("  Threads: {j}");
+        } else {
+            println!("  Threads: {} (all CPUs)", rayon::current_num_threads());
+        }
         println!("  Output: {}", output.display());
         println!();
 

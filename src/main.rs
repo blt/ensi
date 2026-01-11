@@ -160,6 +160,10 @@ enum Commands {
         /// Show verbose progress output
         #[arg(short, long)]
         verbose: bool,
+
+        /// Number of parallel threads (default: all CPUs)
+        #[arg(short, long)]
+        jobs: Option<usize>,
     },
 
     /// List and manage evolved bots stored in ~/.ensi/evolved/
@@ -227,7 +231,8 @@ fn main() -> ExitCode {
             seed,
             resume,
             verbose,
-        } => cli::evolve::execute(output, population, generations, games, seed, resume, verbose),
+            jobs,
+        } => cli::evolve::execute(output, population, generations, games, seed, resume, verbose, jobs),
 
         Commands::Bots { list, path, examine } => {
             let path_arg = if path {

@@ -1,5 +1,9 @@
 //! Output formatting utilities for CLI.
 
+// Allow format! with push_str for readability in output formatting
+// Allow precision loss for statistics display
+#![allow(clippy::format_push_string, clippy::cast_precision_loss)]
+
 use ensi::tournament::GameResult;
 use serde::Serialize;
 
@@ -30,7 +34,7 @@ pub(super) struct JsonPlayerResult {
 }
 
 impl JsonGameResult {
-    /// Create from a GameResult.
+    /// Create from a `GameResult`.
     pub(super) fn from_game_result(result: &GameResult) -> Self {
         Self {
             seed: result.seed,
@@ -170,7 +174,7 @@ impl TournamentStats {
         self.total_turns as f64 / self.games_played as f64
     }
 
-    /// Merge another TournamentStats into this one.
+    /// Merge another `TournamentStats` into this one.
     /// Used for lock-free parallel aggregation.
     pub(super) fn merge(&mut self, other: &Self) {
         self.games_played += other.games_played;

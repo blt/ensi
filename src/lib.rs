@@ -22,6 +22,7 @@
 
 pub mod error;
 pub mod game;
+pub mod gp;
 pub mod replay;
 pub mod tournament;
 pub mod wasm;

@@ -1,5 +1,7 @@
 //! Run command implementation.
 
+#![allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
+
 use super::output::{format_text, JsonGameResult};
 use super::{CliError, OutputFormat};
 use ensi::replay::{render_llm, Recording};
@@ -32,9 +34,7 @@ pub(crate) fn execute(
         programs.push(PlayerProgram::new(elf_bytes));
         bot_names.push(
             bot_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
+                .file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string()),
         );
     }
 

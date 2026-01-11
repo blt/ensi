@@ -1,5 +1,10 @@
 //! CLI command implementations for Ensi.
 
+// CLI code is allowed to print to stderr for progress/error messages
+#![allow(clippy::print_stderr)]
+
+pub(crate) mod bots;
+pub(crate) mod evolve;
 pub(crate) mod replay;
 pub(crate) mod run;
 pub(crate) mod tournament;

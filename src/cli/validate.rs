@@ -1,5 +1,7 @@
 //! WASM validation command implementation.
 
+#![allow(clippy::needless_pass_by_value)]
+
 use super::CliError;
 use ensi::wasm::WasmBot;
 use std::fs;

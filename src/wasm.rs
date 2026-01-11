@@ -3,6 +3,14 @@
 //! This module provides WASM-based bot execution using wasmtime with fuel metering.
 //! Bots are compiled from C/Rust to WASM and executed in a sandboxed environment.
 
+// WASM runtime code intentionally uses casts for memory/ABI operations
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 mod host;
 
 use crate::game::{
@@ -81,9 +89,9 @@ pub struct BotState {
     turn: u32,
     /// Player's capital coordinate.
     capital: Option<Coord>,
-    /// Current capital population (for move_capital validation).
+    /// Current capital population (for `move_capital` validation).
     capital_population: u32,
-    /// Raw pointer to the map (valid only during run_turn).
+    /// Raw pointer to the map (valid only during `run_turn`).
     /// This avoids cloning the map for each callback.
     map_ptr: *const Map,
 }
@@ -170,7 +178,7 @@ impl BotState {
         }
     }
 
-    /// Reset for a new turn (but keep map_ptr, it's set separately).
+    /// Reset for a new turn (but keep `map_ptr`, it's set separately).
     fn reset(&mut self) {
         self.command_count = 0;
         self.yielded = false;
@@ -197,20 +205,18 @@ impl BotState {
         let map = unsafe { self.map() };
 
         // Check if player owns this tile
-        if let Some(tile) = map.get(coord) {
-            if tile.owner == Some(self.player_id) {
+        if let Some(tile) = map.get(coord)
+            && tile.owner == Some(self.player_id) {
                 return true;
             }
-        }
 
         // Check adjacent tiles
         let (adjacent, count) = coord.adjacent(self.map_width, self.map_height);
         for adj in &adjacent[..count as usize] {
-            if let Some(tile) = map.get(*adj) {
-                if tile.owner == Some(self.player_id) {
+            if let Some(tile) = map.get(*adj)
+                && tile.owner == Some(self.player_id) {
                     return true;
                 }
-            }
         }
         false
     }
@@ -308,18 +314,18 @@ impl BotState {
 }
 
 /// Base address in WASM linear memory for the tile map.
-/// The host writes visible tiles here before calling run_turn.
+/// The host writes visible tiles here before calling `run_turn`.
 /// This eliminates syscall overhead for tile queries.
 pub const TILE_MAP_BASE_ADDR: usize = 0x10000;
 
-/// Header size in bytes (magic + version + width + height + turn + player_id).
+/// Header size in bytes (magic + version + width + height + turn + `player_id`).
 pub const TILE_MAP_HEADER_SIZE: usize = 16;
 
 /// A WASM-based bot.
 pub struct WasmBot {
     /// wasmtime store (owns the instance data).
     store: Store<BotState>,
-    /// run_turn function handle.
+    /// `run_turn` function handle.
     run_turn: TypedFunc<i32, i32>,
     /// Exported memory for push-based visibility.
     memory: wasmtime::Memory,
@@ -471,8 +477,8 @@ impl WasmBot {
     /// This pre-computes fog of war and writes all tiles to a known memory address,
     /// allowing bots to read tile data directly from memory instead of making syscalls.
     ///
-    /// Memory layout at TILE_MAP_BASE_ADDR:
-    /// - Header (16 bytes): magic(4), width(2), height(2), turn(4), player_id(2), reserved(2)
+    /// Memory layout at `TILE_MAP_BASE_ADDR`:
+    /// - Header (16 bytes): magic(4), width(2), height(2), turn(4), `player_id(2)`, reserved(2)
     /// - Tiles: width * height * 4 bytes, each tile packed as (type | owner << 8 | army << 16)
     fn push_visibility_map(&mut self, game_state: &GameState) -> Result<(), WasmError> {
         let player_id = self.store.data().player_id;
@@ -489,7 +495,7 @@ impl WasmBot {
                 ((TILE_MAP_BASE_ADDR + total_size - mem_size) / 65536) as u64 + 1;
             self.memory
                 .grow(&mut self.store, pages_needed)
-                .map_err(|e| WasmError::Wasmtime(e.into()))?;
+                .map_err(WasmError::Wasmtime)?;
         }
 
         // Get direct access to memory for bulk writes
@@ -497,7 +503,7 @@ impl WasmBot {
 
         // Write header: magic "ENSI" (0x49534E45), width, height, turn, player_id
         let header_offset = TILE_MAP_BASE_ADDR;
-        mem_data[header_offset..header_offset + 4].copy_from_slice(&0x49534E45u32.to_le_bytes());
+        mem_data[header_offset..header_offset + 4].copy_from_slice(&0x4953_4E45_u32.to_le_bytes());
         mem_data[header_offset + 4..header_offset + 6].copy_from_slice(&width.to_le_bytes());
         mem_data[header_offset + 6..header_offset + 8].copy_from_slice(&height.to_le_bytes());
         mem_data[header_offset + 8..header_offset + 12]
@@ -541,7 +547,7 @@ impl WasmBot {
                 u32::from(tile_type) | (u32::from(owner) << 8) | (u32::from(army) << 16)
             } else {
                 // Fog: type=255, owner=255, army=0
-                0x0000FFFF
+                0x0000_FFFF
             };
 
             let offset = tiles_offset + idx * 4;
@@ -577,7 +583,7 @@ impl WasmBot {
             state.turn = game_state.turn();
 
             // Store raw pointer to map (avoids cloning)
-            state.map_ptr = &game_state.map as *const Map;
+            state.map_ptr = &raw const game_state.map;
 
             // Cache capital info (small data, worth copying)
             if let Some(player) = game_state.get_player(player_id) {
@@ -614,7 +620,7 @@ impl WasmBot {
                 } else {
                     let remaining = self.store.get_fuel().unwrap_or(0);
                     TurnResult::BudgetExhausted {
-                        remaining: remaining.min(u32::MAX as u64) as u32,
+                        remaining: remaining.min(u64::from(u32::MAX)) as u32,
                     }
                 }
             }

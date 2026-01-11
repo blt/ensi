@@ -1,5 +1,7 @@
 //! Combat resolution.
 
+use std::cmp::Ordering;
+
 use crate::game::{Coord, Map, PlayerId};
 
 /// Result of combat on a single tile.
@@ -129,28 +131,32 @@ pub fn process_attack(
     }
 
     // Combat resolution
-    if attacking_army > defending_army {
-        // Attacker wins
-        let remaining = attacking_army - defending_army;
-        if let Some(to_tile) = map.get_mut(to) {
-            to_tile.owner = Some(attacker_owner);
-            to_tile.army = remaining;
+    match attacking_army.cmp(&defending_army) {
+        Ordering::Greater => {
+            // Attacker wins
+            let remaining = attacking_army - defending_army;
+            if let Some(to_tile) = map.get_mut(to) {
+                to_tile.owner = Some(attacker_owner);
+                to_tile.army = remaining;
+            }
+            true
         }
-        true
-    } else if attacking_army < defending_army {
-        // Defender wins
-        let remaining = defending_army - attacking_army;
-        if let Some(to_tile) = map.get_mut(to) {
-            to_tile.army = remaining;
+        Ordering::Less => {
+            // Defender wins
+            let remaining = defending_army - attacking_army;
+            if let Some(to_tile) = map.get_mut(to) {
+                to_tile.army = remaining;
+            }
+            false
         }
-        false
-    } else {
-        // Tie - both destroyed, tile becomes neutral
-        if let Some(to_tile) = map.get_mut(to) {
-            to_tile.owner = None;
-            to_tile.army = 0;
+        Ordering::Equal => {
+            // Tie - both destroyed, tile becomes neutral
+            if let Some(to_tile) = map.get_mut(to) {
+                to_tile.owner = None;
+                to_tile.army = 0;
+            }
+            false
         }
-        false
     }
 }
 

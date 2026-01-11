@@ -9,7 +9,7 @@
 //! # Time Travel
 //!
 //! - **Forward**: Continue stepping the simulation
-//! - **Backward**: Re-run from turn 0 to (current_turn - 1)
+//! - **Backward**: Re-run from turn 0 to (`current_turn` - 1)
 //! - **Jump to turn N**: Re-run from turn 0 to N
 
 mod render;
@@ -63,7 +63,7 @@ impl Recording {
     ///
     /// Format: Simple binary format:
     /// - 8 bytes: seed (little-endian)
-    /// - 4 bytes: num_programs (little-endian u32)
+    /// - 4 bytes: `num_programs` (little-endian u32)
     /// - For each program:
     ///   - 4 bytes: program length (little-endian u32)
     ///   - N bytes: program WASM bytes
@@ -355,7 +355,7 @@ impl ReplayEngine {
 
     /// Step backward one turn.
     ///
-    /// This replays from turn 0 to (current_turn - 1).
+    /// This replays from turn 0 to (`current_turn` - 1).
     ///
     /// # Errors
     ///
@@ -449,7 +449,7 @@ impl ReplayEngine {
                 let alive = self
                     .game_state
                     .get_player(bot.player_id)
-                    .map_or(false, |p| p.alive);
+                    .is_some_and(|p| p.alive);
                 if !alive {
                     bot.eliminated = true;
                 }
@@ -469,22 +469,21 @@ impl ReplayEngine {
                     .game_state
                     .map
                     .get(from)
-                    .map_or(false, |t| t.owner == Some(player_id) && t.army >= count);
+                    .is_some_and(|t| t.owner == Some(player_id) && t.army >= count);
 
                 if can_move {
                     process_attack(&mut self.game_state.map, from, to, count);
                 }
             }
             Command::Convert { city, count } => {
-                if let Some(tile) = self.game_state.map.get_mut(city) {
-                    if tile.owner == Some(player_id)
+                if let Some(tile) = self.game_state.map.get_mut(city)
+                    && tile.owner == Some(player_id)
                         && tile.tile_type == TileType::City
                         && tile.population >= count
                     {
                         tile.population -= count;
                         tile.army += count;
                     }
-                }
             }
             Command::MoveCapital { new_capital } => {
                 self.game_state.try_move_capital(player_id, new_capital);

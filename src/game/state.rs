@@ -1,5 +1,12 @@
 //! Game state management.
 
+// State uses intentional casts for game value calculations
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+
 use crate::game::{
     apply_economy, calculate_food_balance, Coord, FoodBalance, Map, Player, PlayerId, TileType,
 };
@@ -26,10 +33,10 @@ pub struct CachedPlayerStats {
 
 /// Collection of cached stats for all players.
 ///
-/// Uses a fixed-size array indexed by player_id - 1 to avoid heap allocation.
+/// Uses a fixed-size array indexed by `player_id` - 1 to avoid heap allocation.
 #[derive(Debug, Clone, Copy)]
 pub struct AllPlayerStats {
-    /// Stats indexed by player_id - 1.
+    /// Stats indexed by `player_id` - 1.
     stats: [CachedPlayerStats; MAX_PLAYERS],
 }
 
@@ -139,9 +146,9 @@ impl GameState {
     /// Calculate the score for a player.
     #[must_use]
     pub fn calculate_score(&self, player_id: PlayerId) -> f64 {
-        let population = self.map.total_population(player_id) as f64;
-        let cities = self.map.count_cities(player_id) as f64;
-        let territory = self.map.count_territory(player_id) as f64;
+        let population = f64::from(self.map.total_population(player_id));
+        let cities = f64::from(self.map.count_cities(player_id));
+        let territory = f64::from(self.map.count_territory(player_id));
 
         population * self.scoring.population
             + cities * self.scoring.city
@@ -158,20 +165,18 @@ impl GameState {
     #[must_use]
     pub fn can_see_tile(&self, player_id: PlayerId, coord: Coord) -> bool {
         // Check if player owns this tile
-        if let Some(tile) = self.map.get(coord) {
-            if tile.owner == Some(player_id) {
+        if let Some(tile) = self.map.get(coord)
+            && tile.owner == Some(player_id) {
                 return true;
             }
-        }
 
         // Check if player owns any adjacent tile
         let (adjacent, count) = coord.adjacent(self.map.width(), self.map.height());
         for adj in &adjacent[..count as usize] {
-            if let Some(tile) = self.map.get(*adj) {
-                if tile.owner == Some(player_id) {
+            if let Some(tile) = self.map.get(*adj)
+                && tile.owner == Some(player_id) {
                     return true;
                 }
-            }
         }
 
         false
@@ -224,7 +229,7 @@ impl GameState {
             let capital_owned = self
                 .map
                 .get(player.capital)
-                .map_or(false, |tile| tile.owner == Some(player.id));
+                .is_some_and(|tile| tile.owner == Some(player.id));
 
             // Use pre-computed stats instead of iterating map
             let total_pop = all_stats.get(player.id).population;
@@ -316,8 +321,8 @@ impl GameState {
         let max_workers = territory.saturating_mul(WORKERS_PER_TILE);
         let effective_workers = population.min(max_workers);
 
-        let labor_factor = (effective_workers as f64).sqrt();
-        let land_factor = (territory as f64).sqrt();
+        let labor_factor = f64::from(effective_workers).sqrt();
+        let land_factor = f64::from(territory).sqrt();
 
         (labor_factor * land_factor * SCALING_FACTOR) as u32
     }

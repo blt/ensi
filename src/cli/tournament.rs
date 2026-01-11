@@ -1,5 +1,13 @@
 //! Tournament command implementation.
 
+// CLI tournament uses intentional casts for stats and timing
+#![allow(
+    clippy::too_many_arguments,
+    clippy::needless_pass_by_value,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
+
 use super::output::{format_tournament_csv, format_tournament_text, JsonTournamentResult, TournamentStats};
 use super::{CliError, TournamentFormat};
 use ensi::tournament::{run_game_with_modules, CompiledProgram, PlayerProgram, TournamentConfig};
@@ -44,9 +52,7 @@ pub(crate) fn execute(
         compiled_modules.push(compiled);
         bot_names.push(
             bot_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
+                .file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string()),
         );
     }
 

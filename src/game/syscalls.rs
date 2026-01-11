@@ -82,7 +82,7 @@ pub struct GameSyscallHandler<'a> {
     yielded: bool,
 }
 
-impl<'a> std::fmt::Debug for GameSyscallHandler<'a> {
+impl std::fmt::Debug for GameSyscallHandler<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GameSyscallHandler")
             .field("player_id", &self.player_id)

@@ -4,6 +4,13 @@
 //! human-parseable. It provides all relevant game state information
 //! in a structured format.
 
+// Allow format! with push_str for readability - the allocation overhead is negligible for text rendering
+#![allow(
+    clippy::format_push_string,
+    clippy::manual_let_else,
+    clippy::cast_possible_wrap
+)]
+
 use crate::game::{Coord, GameState, PlayerId, TileType};
 
 /// Render game state to structured text format for LLM consumption.
@@ -126,22 +133,19 @@ fn find_contested_areas(state: &GameState) -> Vec<Coord> {
     for y in 0..height {
         for x in 0..width {
             let coord = Coord::new(x, y);
-            if let Some(tile) = state.map.get(coord) {
-                if tile.army > 0 {
-                    if let Some(owner) = tile.owner {
+            if let Some(tile) = state.map.get(coord)
+                && tile.army > 0
+                    && let Some(owner) = tile.owner {
                         // Check if any adjacent tile has a different owner's army
                         let (adjacent, adj_count) = coord.adjacent(width, height);
                         for adj in &adjacent[..adj_count as usize] {
-                            if let Some(adj_tile) = state.map.get(*adj) {
-                                if adj_tile.army > 0 && adj_tile.owner != Some(owner) {
+                            if let Some(adj_tile) = state.map.get(*adj)
+                                && adj_tile.army > 0 && adj_tile.owner != Some(owner) {
                                     contested.push(coord);
                                     break;
                                 }
-                            }
                         }
                     }
-                }
-            }
         }
     }
 
@@ -155,7 +159,7 @@ fn render_player_status(output: &mut String, state: &GameState, player_id: Playe
         None => return,
     };
 
-    output.push_str(&format!("PLAYER {} STATUS:\n", player_id));
+    output.push_str(&format!("PLAYER {player_id} STATUS:\n"));
 
     if !player.alive {
         output.push_str("- ELIMINATED\n\n");
@@ -175,8 +179,8 @@ fn render_player_status(output: &mut String, state: &GameState, player_id: Playe
     for y in 0..height {
         for x in 0..width {
             let coord = Coord::new(x, y);
-            if let Some(tile) = state.map.get(coord) {
-                if tile.owner == Some(player_id) {
+            if let Some(tile) = state.map.get(coord)
+                && tile.owner == Some(player_id) {
                     territory += 1;
                     total_army += tile.army;
 
@@ -189,7 +193,6 @@ fn render_player_status(output: &mut String, state: &GameState, player_id: Playe
                         total_pop += tile.population;
                     }
                 }
-            }
         }
     }
 

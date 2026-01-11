@@ -6,19 +6,27 @@
 //!
 //! # Production Model
 //!
-//! Production = sqrt(effective_workers) × sqrt(territory) × SCALING_FACTOR
+//! `Production = sqrt(effective_workers) * sqrt(territory) * SCALING_FACTOR`
 //!
 //! Where:
-//! - effective_workers = min(population, territory × WORKERS_PER_TILE)
-//! - WORKERS_PER_TILE = 10 (max efficient workers per territory tile)
-//! - SCALING_FACTOR = 7.0 (gives ~50× territory equilibrium)
+//! - `effective_workers = min(population, territory * WORKERS_PER_TILE)`
+//! - `WORKERS_PER_TILE` = 10 (max efficient workers per territory tile)
+//! - `SCALING_FACTOR` = 7.0 (gives ~50x territory equilibrium)
 //!
 //! # Equilibrium
 //!
-//! At equilibrium with no army: pop ≈ territory × 50
-//! - 10 tiles → ~500 population
-//! - 100 tiles → ~5,000 population
-//! - 1000 tiles → ~50,000 population
+//! At equilibrium with no army: pop ~ territory * 50
+//! - 10 tiles -> ~500 population
+//! - 100 tiles -> ~5,000 population
+//! - 1000 tiles -> ~50,000 population
+
+// Economy uses intentional casts for population/resource calculations
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 
 use crate::game::{Coord, Map, PlayerId, TileType};
 
@@ -44,13 +52,14 @@ pub struct FoodBalance {
 
 /// Calculate food production with diminishing returns.
 ///
-/// Production = sqrt(effective_workers) × sqrt(territory) × scaling
+/// `Production = sqrt(effective_workers) * sqrt(territory) * scaling`
 ///
 /// This creates natural equilibrium because:
-/// - sqrt() gives diminishing returns on labor
+/// - `sqrt()` gives diminishing returns on labor
 /// - Territory limits max workers
 /// - More land needed for larger populations
 #[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn calculate_production(territory: u32, population: u32) -> u32 {
     if territory == 0 || population == 0 {
         return 0;
@@ -59,8 +68,8 @@ fn calculate_production(territory: u32, population: u32) -> u32 {
     let max_workers = territory.saturating_mul(WORKERS_PER_TILE);
     let effective_workers = population.min(max_workers);
 
-    let labor_factor = (effective_workers as f64).sqrt();
-    let land_factor = (territory as f64).sqrt();
+    let labor_factor = f64::from(effective_workers).sqrt();
+    let land_factor = f64::from(territory).sqrt();
 
     (labor_factor * land_factor * SCALING_FACTOR) as u32
 }
@@ -75,7 +84,7 @@ fn calculate_consumption(population: u32, army: u32) -> u32 {
 
 /// Calculate the food balance for a player.
 ///
-/// Uses Cobb-Douglas production: sqrt(workers) × sqrt(territory) × 7
+/// Uses Cobb-Douglas production: `sqrt(workers) * sqrt(territory) * 7`
 /// Consumption: 1 per population + 1 per army
 #[must_use]
 pub fn calculate_food_balance(map: &Map, player: PlayerId) -> FoodBalance {
@@ -160,7 +169,7 @@ fn apply_growth(map: &mut Map, player: PlayerId, growth: i32, result: &mut Econo
     let remainder = growth % cities.len() as i32;
 
     for (i, coord) in cities.iter().enumerate() {
-        let extra = if (i as i32) < remainder { 1 } else { 0 };
+        let extra = i32::from((i as i32) < remainder);
         let city_growth = growth_per_city + extra;
 
         if let Some(tile) = map.get_mut(*coord) {
@@ -214,7 +223,7 @@ fn apply_starvation(
             // Check for rebellion
             // Probability = deficit / city_population (capped at 1.0)
             if tile.population > 0 {
-                let rebellion_chance = (deficit as f64 / tile.population as f64).min(1.0);
+                let rebellion_chance = (f64::from(deficit) / f64::from(tile.population)).min(1.0);
                 let roll = simple_hash(rng_seed, i as u64) as f64 / u64::MAX as f64;
 
                 if roll < rebellion_chance {

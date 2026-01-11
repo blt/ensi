@@ -1,5 +1,12 @@
 //! Deterministic map generation for tournaments.
 
+// Map generation uses intentional casts for coordinate/RNG operations
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
 use crate::game::{Coord, Map, Player, PlayerId, Tile, TileType};
 
 /// Deterministic PRNG using xorshift64.
@@ -158,14 +165,13 @@ fn place_neutral_cities(map: &mut Map, rng: &mut Rng) {
             let y = base_y.saturating_add(rng.next_u32(u32::from(cell_height)) as u16);
             let coord = Coord::new(x, y);
 
-            if let Some(tile) = map.get(coord) {
-                if tile.tile_type == TileType::Desert {
+            if let Some(tile) = map.get(coord)
+                && tile.tile_type == TileType::Desert {
                     // Place neutral city with random population
                     let population = 50 + rng.next_u32(100);
                     map.set(coord, Tile::city(population));
                     placed += 1;
                 }
-            }
         }
     }
 }
@@ -184,7 +190,7 @@ fn find_starting_positions(
         .flat_map(|y| (0..width).map(move |x| Coord::new(x, y)))
         .filter(|&coord| {
             map.get(coord)
-                .map_or(false, |t| t.tile_type == TileType::Desert)
+                .is_some_and(|t| t.tile_type == TileType::Desert)
         })
         .collect();
 

@@ -130,6 +130,52 @@ enum Commands {
         #[arg(required = true)]
         bot: std::path::PathBuf,
     },
+
+    /// Evolve bots using genetic programming
+    Evolve {
+        /// Output directory for checkpoints and best bot
+        #[arg(short, long, default_value = "evolution")]
+        output: std::path::PathBuf,
+
+        /// Population size (default: 100)
+        #[arg(short, long, default_value = "100")]
+        population: usize,
+
+        /// Number of generations (0 = run forever until Ctrl+C)
+        #[arg(short, long, default_value = "0")]
+        generations: usize,
+
+        /// Games per fitness evaluation (default: 20)
+        #[arg(long, default_value = "20")]
+        games: usize,
+
+        /// Random seed (default: system time)
+        #[arg(short, long)]
+        seed: Option<u64>,
+
+        /// Resume from checkpoint file
+        #[arg(short, long)]
+        resume: Option<std::path::PathBuf>,
+
+        /// Show verbose progress output
+        #[arg(short, long)]
+        verbose: bool,
+    },
+
+    /// List and manage evolved bots stored in ~/.ensi/evolved/
+    Bots {
+        /// List all evolved bots (default action)
+        #[arg(short, long)]
+        list: bool,
+
+        /// Show path to evolved bots directory
+        #[arg(long)]
+        path: bool,
+
+        /// Examine a specific bot's genome
+        #[arg(short, long)]
+        examine: Option<std::path::PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -172,6 +218,25 @@ fn main() -> ExitCode {
         } => cli::tournament::execute(bots, games, seed, threads, budget, max_turns, format, progress),
 
         Commands::Validate { bot } => cli::validate::execute(bot),
+
+        Commands::Evolve {
+            output,
+            population,
+            generations,
+            games,
+            seed,
+            resume,
+            verbose,
+        } => cli::evolve::execute(output, population, generations, games, seed, resume, verbose),
+
+        Commands::Bots { list, path, examine } => {
+            let path_arg = if path {
+                Some(ensi::gp::evolved_bots_dir().unwrap_or_default())
+            } else {
+                None
+            };
+            cli::bots::execute(list, path_arg, examine)
+        }
     };
 
     match result {

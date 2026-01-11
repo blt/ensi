@@ -1,5 +1,8 @@
 //! Map and tile types.
 
+// Map uses intentional casts for coordinate calculations
+#![allow(clippy::cast_possible_truncation)]
+
 use crate::game::PlayerId;
 
 /// A coordinate on the map.

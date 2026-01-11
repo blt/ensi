@@ -1,5 +1,7 @@
 //! Replay command implementation.
 
+#![allow(clippy::needless_pass_by_value, clippy::items_after_statements)]
+
 use super::{CliError, ReplayFormat};
 use ensi::replay::{render_ascii, render_llm, Recording, ReplayEngine};
 use std::path::PathBuf;
@@ -101,7 +103,7 @@ fn run_replay_tui(engine: ReplayEngine, player: Option<u8>) -> Result<(), CliErr
             let turn = app.engine.turn();
             let max_turns = app.engine.recording().config.max_turns;
             let status = if app.engine.is_game_over() { "GAME OVER" } else { "REPLAY" };
-            let title = format!(" Ensi Replay | Turn {}/{} | {} ", turn, max_turns, status);
+            let title = format!(" Ensi Replay | Turn {turn}/{max_turns} | {status} ");
             let header = Paragraph::new(title)
                 .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
                 .block(Block::default().borders(Borders::ALL));
@@ -123,9 +125,9 @@ fn run_replay_tui(engine: ReplayEngine, player: Option<u8>) -> Result<(), CliErr
         }).map_err(|e| CliError::new(e.to_string()))?;
 
         // Handle input
-        if event::poll(Duration::from_millis(100)).map_err(|e| CliError::new(e.to_string()))? {
-            if let Event::Key(key) = event::read().map_err(|e| CliError::new(e.to_string()))? {
-                if key.kind == KeyEventKind::Press {
+        if event::poll(Duration::from_millis(100)).map_err(|e| CliError::new(e.to_string()))?
+            && let Event::Key(key) = event::read().map_err(|e| CliError::new(e.to_string()))?
+                && key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Right | KeyCode::Char('l') => {
@@ -141,8 +143,6 @@ fn run_replay_tui(engine: ReplayEngine, player: Option<u8>) -> Result<(), CliErr
                         _ => {}
                     }
                 }
-            }
-        }
     }
 
     // Restore terminal

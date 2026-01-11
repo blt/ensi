@@ -9,6 +9,9 @@
 //! - Command collection and sequential application
 //! - Game state updates (combat, economy, eliminations)
 
+// Tournament uses intentional casts and Result patterns
+#![allow(clippy::cast_possible_truncation, clippy::unnecessary_wraps)]
+
 mod mapgen;
 
 pub use mapgen::{generate_map, MapGenError};
@@ -450,42 +453,39 @@ impl GameRunner {
             // Run the bot
             let result = player_bot.bot.run_turn(fuel_budget, game_state, &all_stats);
 
-            match result {
-                Ok((turn_result, commands)) => {
-                    let trapped = matches!(turn_result, TurnResult::Trap(_));
-                    let fuel_consumed = match turn_result {
-                        TurnResult::BudgetExhausted { remaining } => {
-                            fuel_budget.saturating_sub(u64::from(remaining))
-                        }
-                        TurnResult::Trap(_) => fuel_budget,
-                    };
-
-                    // Copy commands to fixed array
-                    let mut cmd_array = [Command::Yield; MAX_COMMANDS_PER_TURN];
-                    let cmd_count = commands.len().min(MAX_COMMANDS_PER_TURN);
-                    cmd_array[..cmd_count].copy_from_slice(&commands[..cmd_count]);
-
-                    turn_commands_vec.push(TurnCommands {
-                        player_id: player_bot.player_id,
-                        commands: cmd_array,
-                        command_count: cmd_count as u16,
-                    });
-
-                    player_bot.total_fuel_consumed += fuel_consumed;
-                    if trapped {
-                        player_bot.trap_count += 1;
+            if let Ok((turn_result, commands)) = result {
+                let trapped = matches!(turn_result, TurnResult::Trap(_));
+                let fuel_consumed = match turn_result {
+                    TurnResult::BudgetExhausted { remaining } => {
+                        fuel_budget.saturating_sub(u64::from(remaining))
                     }
-                }
-                Err(_) => {
-                    // Bot execution failed - treat as trap
-                    turn_commands_vec.push(TurnCommands {
-                        player_id: player_bot.player_id,
-                        commands: [Command::Yield; MAX_COMMANDS_PER_TURN],
-                        command_count: 0,
-                    });
+                    TurnResult::Trap(_) => fuel_budget,
+                };
+
+                // Copy commands to fixed array
+                let mut cmd_array = [Command::Yield; MAX_COMMANDS_PER_TURN];
+                let cmd_count = commands.len().min(MAX_COMMANDS_PER_TURN);
+                cmd_array[..cmd_count].copy_from_slice(&commands[..cmd_count]);
+
+                turn_commands_vec.push(TurnCommands {
+                    player_id: player_bot.player_id,
+                    commands: cmd_array,
+                    command_count: cmd_count as u16,
+                });
+
+                player_bot.total_fuel_consumed += fuel_consumed;
+                if trapped {
                     player_bot.trap_count += 1;
-                    player_bot.total_fuel_consumed += fuel_budget;
                 }
+            } else {
+                // Bot execution failed - treat as trap
+                turn_commands_vec.push(TurnCommands {
+                    player_id: player_bot.player_id,
+                    commands: [Command::Yield; MAX_COMMANDS_PER_TURN],
+                    command_count: 0,
+                });
+                player_bot.trap_count += 1;
+                player_bot.total_fuel_consumed += fuel_budget;
             }
         }
 
@@ -513,22 +513,21 @@ impl GameRunner {
                     .game_state
                     .map
                     .get(from)
-                    .map_or(false, |t| t.owner == Some(player_id) && t.army >= count);
+                    .is_some_and(|t| t.owner == Some(player_id) && t.army >= count);
 
                 if can_move {
                     process_attack(&mut self.game_state.map, from, to, count);
                 }
             }
             Command::Convert { city, count } => {
-                if let Some(tile) = self.game_state.map.get_mut(city) {
-                    if tile.owner == Some(player_id)
+                if let Some(tile) = self.game_state.map.get_mut(city)
+                    && tile.owner == Some(player_id)
                         && tile.tile_type == TileType::City
                         && tile.population >= count
                     {
                         tile.population -= count;
                         tile.army += count;
                     }
-                }
             }
             Command::MoveCapital { new_capital } => {
                 self.game_state.try_move_capital(player_id, new_capital);
@@ -550,7 +549,7 @@ impl GameRunner {
             let player_alive = self
                 .game_state
                 .get_player(bot.player_id)
-                .map_or(false, |p| p.alive);
+                .is_some_and(|p| p.alive);
 
             if !player_alive {
                 bot.eliminated = true;

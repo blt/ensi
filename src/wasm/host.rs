@@ -2,6 +2,17 @@
 //!
 //! These functions are imported by WASM bots and provide game interaction.
 
+// WASM host functions intentionally use casts for ABI compatibility
+// needless_pass_by_value is required by wasmtime's Caller API
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::needless_pass_by_value,
+    clippy::bool_to_int_with_if
+)]
+
 use super::{BotState, TileInfo, WasmError};
 use crate::game::{Command, Coord};
 use wasmtime::{Caller, Linker};
@@ -54,7 +65,7 @@ fn ensi_get_my_capital(caller: Caller<'_, BotState>) -> i32 {
 }
 
 /// Get tile information at coordinates.
-/// Returns packed (tile_type | owner << 8 | army << 16).
+/// Returns packed (`tile_type` | owner << 8 | army << 16).
 fn ensi_get_tile(caller: Caller<'_, BotState>, x: i32, y: i32) -> i32 {
     let state = caller.data();
     let coord = Coord::new(x as u16, y as u16);

@@ -1,5 +1,13 @@
 //! Watch command implementation - Interactive TUI viewer.
 
+// CLI watch uses intentional casts for display and timing
+#![allow(
+    clippy::similar_names,
+    clippy::needless_pass_by_value,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+
 use super::CliError;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -45,9 +53,7 @@ pub(crate) fn execute(
         programs.push(PlayerProgram::new(wasm_bytes.clone()));
         bot_names.push(
             bot_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
+                .file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string()),
         );
     }
 
@@ -146,9 +152,9 @@ fn run_tui(engine: ReplayEngine, bot_names: Vec<String>, speed: u64, player: Opt
         }
 
         // Handle input with timeout
-        if event::poll(Duration::from_millis(50)).map_err(|e| CliError::new(e.to_string()))? {
-            if let Event::Key(key) = event::read().map_err(|e| CliError::new(e.to_string()))? {
-                if key.kind == KeyEventKind::Press {
+        if event::poll(Duration::from_millis(50)).map_err(|e| CliError::new(e.to_string()))?
+            && let Event::Key(key) = event::read().map_err(|e| CliError::new(e.to_string()))?
+                && key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char(' ') => app.toggle_pause(),
@@ -160,7 +166,7 @@ fn run_tui(engine: ReplayEngine, bot_names: Vec<String>, speed: u64, player: Opt
                             app.paused = true;
                             app.step_backward();
                         }
-                        KeyCode::Char('+') | KeyCode::Char('=') => app.increase_speed(),
+                        KeyCode::Char('+' | '=') => app.increase_speed(),
                         KeyCode::Char('-') => app.decrease_speed(),
                         KeyCode::Char('r') => {
                             let _ = app.engine.goto_turn(0);
@@ -173,8 +179,6 @@ fn run_tui(engine: ReplayEngine, bot_names: Vec<String>, speed: u64, player: Opt
                         _ => {}
                     }
                 }
-            }
-        }
     }
 
     // Restore terminal
@@ -310,10 +314,10 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
         let name = app.bot_names.get(i).map_or("Unknown", String::as_str);
         let color = player_color(player.id);
 
-        let status = if !player.alive {
-            " [ELIMINATED]"
-        } else {
+        let status = if player.alive {
             ""
+        } else {
+            " [ELIMINATED]"
         };
 
         lines.push(Line::from(vec![
@@ -321,7 +325,7 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
                 format!("Player {} ", player.id),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("({}){}", name, status)),
+            Span::raw(format!("({name}){status}")),
         ]));
 
         if player.alive {
@@ -329,10 +333,10 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
             let (cities, pop, army, food) = calculate_player_stats(state, player.id);
             let score = state.calculate_score(player.id);
 
-            lines.push(Line::from(format!("  Cities: {}", cities)));
-            lines.push(Line::from(format!("  Pop: {}  Army: {}", pop, army)));
-            lines.push(Line::from(format!("  Food: {:+}/turn", food)));
-            lines.push(Line::from(format!("  Score: {:.0}", score)));
+            lines.push(Line::from(format!("  Cities: {cities}")));
+            lines.push(Line::from(format!("  Pop: {pop}  Army: {army}")));
+            lines.push(Line::from(format!("  Food: {food:+}/turn")));
+            lines.push(Line::from(format!("  Score: {score:.0}")));
         }
         lines.push(Line::from(""));
     }
@@ -352,15 +356,14 @@ fn calculate_player_stats(state: &GameState, player_id: PlayerId) -> (u32, u32, 
     for y in 0..state.map.height() {
         for x in 0..state.map.width() {
             let coord = ensi::Coord::new(x, y);
-            if let Some(tile) = state.map.get(coord) {
-                if tile.owner == Some(player_id) {
+            if let Some(tile) = state.map.get(coord)
+                && tile.owner == Some(player_id) {
                     army += tile.army;
                     if matches!(tile.tile_type, ensi::game::TileType::City) {
                         cities += 1;
                         pop += tile.population;
                     }
                 }
-            }
         }
     }
 

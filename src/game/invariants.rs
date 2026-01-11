@@ -79,8 +79,7 @@ pub fn check_invariants(state: &GameState) -> Vec<InvariantViolation> {
     if total_population > SANITY_MAX_TOTAL_POP {
         violations.push(InvariantViolation {
             message: format!(
-                "Total population {} exceeds sanity max {}",
-                total_population, SANITY_MAX_TOTAL_POP
+                "Total population {total_population} exceeds sanity max {SANITY_MAX_TOTAL_POP}"
             ),
         });
     }

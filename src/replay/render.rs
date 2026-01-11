@@ -1,5 +1,12 @@
 //! ASCII renderer for terminal viewing with ANSI colors.
 
+// Rendering uses format_push_string for readability and intentional casts
+#![allow(
+    clippy::format_push_string,
+    clippy::cast_possible_wrap,
+    clippy::manual_let_else
+)]
+
 use crate::game::{Coord, GameState, PlayerId, TileType};
 
 /// ANSI color codes for players.
@@ -97,7 +104,7 @@ fn render_map(output: &mut String, state: &GameState) {
 
     // Top border
     output.push('┌');
-    for _ in 0..(width * 2 + 1) {
+    for _ in 0..=(width * 2) {
         output.push('─');
     }
     output.push_str("┐\n");
@@ -115,7 +122,7 @@ fn render_map(output: &mut String, state: &GameState) {
 
     // Bottom border
     output.push('└');
-    for _ in 0..(width * 2 + 1) {
+    for _ in 0..=(width * 2) {
         output.push('─');
     }
     output.push_str("┘\n");
@@ -123,12 +130,9 @@ fn render_map(output: &mut String, state: &GameState) {
 
 /// Render a single tile.
 fn render_tile(output: &mut String, state: &GameState, coord: Coord) {
-    let tile = match state.map.get(coord) {
-        Some(t) => t,
-        None => {
-            output.push('?');
-            return;
-        }
+    let tile = if let Some(t) = state.map.get(coord) { t } else {
+        output.push('?');
+        return;
     };
 
     let symbol = match tile.tile_type {
@@ -216,15 +220,14 @@ fn render_player_stats(output: &mut String, state: &GameState) {
         for y in 0..state.map.height() {
             for x in 0..state.map.width() {
                 let coord = Coord::new(x, y);
-                if let Some(tile) = state.map.get(coord) {
-                    if tile.owner == Some(player.id) {
+                if let Some(tile) = state.map.get(coord)
+                    && tile.owner == Some(player.id) {
                         total_army += tile.army;
                         if tile.tile_type == TileType::City {
                             cities += 1;
                             total_pop += tile.population;
                         }
                     }
-                }
             }
         }
 

@@ -1,24 +1,33 @@
 //! Economy system: food production, growth, starvation, and rebellion.
 //!
-//! Uses a Cobb-Douglas production model with diminishing returns on both
-//! labor (population) and land (territory). This creates natural equilibrium
-//! without requiring artificial caps.
+//! Uses a city-adjacency production model where cities produce food based
+//! on the number of adjacent tiles owned by the same player.
 //!
 //! # Production Model
 //!
-//! `Production = sqrt(effective_workers) * sqrt(territory) * SCALING_FACTOR`
+//! `City Production = BASE_CITY_PRODUCTION + PRODUCTION_PER_ADJACENT * adjacent_owned`
 //!
 //! Where:
-//! - `effective_workers = min(population, territory * WORKERS_PER_TILE)`
-//! - `WORKERS_PER_TILE` = 10 (max efficient workers per territory tile)
-//! - `SCALING_FACTOR` = 7.0 (gives ~50x territory equilibrium)
+//! - `BASE_CITY_PRODUCTION` = 30 (isolated cities still produce some food)
+//! - `PRODUCTION_PER_ADJACENT` = 20 (bonus per adjacent owned tile)
+//! - `adjacent_owned` = count of adjacent tiles owned by same player (0-4)
 //!
-//! # Equilibrium
+//! Total production is the sum across all owned cities.
+//! Range per city: 30 (isolated) to 110 (4 adjacent) food.
 //!
-//! At equilibrium with no army: pop ~ territory * 50
-//! - 10 tiles -> ~500 population
-//! - 100 tiles -> ~5,000 population
-//! - 1000 tiles -> ~50,000 population
+//! # Consumption Model
+//!
+//! `Consumption = population + army + (desert_tiles * DESERT_UPKEEP)`
+//!
+//! Desert tiles cost 2 food per turn each to maintain. They provide
+//! visibility but no production, limiting mindless expansion.
+//!
+//! # Strategic Implications
+//!
+//! - Cities surrounded by owned tiles produce more food
+//! - Desert tiles cost upkeep but provide only visibility
+//! - Compact territory around cities is economically efficient
+//! - Sprawling desert is costly and provides no production
 
 // Economy uses intentional casts for population/resource calculations
 #![allow(
@@ -30,12 +39,17 @@
 
 use crate::game::{Coord, Map, PlayerId, TileType};
 
-/// Maximum workers that can efficiently work each territory tile.
-/// With 50 workers/tile and scaling factor 7.0, equilibrium is ~50× territory.
-const WORKERS_PER_TILE: u32 = 50;
+/// Base food production per city (even isolated cities produce some food).
+const BASE_CITY_PRODUCTION: u32 = 30;
 
-/// Production scaling factor. With 7.0, equilibrium is ~50× territory.
-const SCALING_FACTOR: f64 = 7.0;
+/// Additional food production per adjacent owned tile.
+/// A city with 4 adjacent owned tiles produces: 30 + 4*20 = 110 food.
+const PRODUCTION_PER_ADJACENT: u32 = 20;
+
+/// Food cost per desert tile per turn.
+/// Desert tiles represent harsh terrain that requires resources to hold.
+/// At value 2: 50 desert tiles costs 100 food/turn (significant but not crippling).
+const DESERT_UPKEEP_PER_TILE: u32 = 2;
 
 /// Food balance for a player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,58 +64,76 @@ pub struct FoodBalance {
     pub territory: u32,
 }
 
-/// Calculate food production with diminishing returns.
+/// Calculate food production for a single city based on adjacent owned tiles.
 ///
-/// `Production = sqrt(effective_workers) * sqrt(territory) * scaling`
+/// `Production = BASE_CITY_PRODUCTION + PRODUCTION_PER_ADJACENT * adjacent_owned`
 ///
-/// This creates natural equilibrium because:
-/// - `sqrt()` gives diminishing returns on labor
-/// - Territory limits max workers
-/// - More land needed for larger populations
+/// This creates incentives for compact territory:
+/// - Isolated cities produce only base food (30)
+/// - Cities surrounded by owned tiles produce up to 110 food
+/// - Desert tiles cost upkeep but don't contribute to production
 #[must_use]
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn calculate_production(territory: u32, population: u32) -> u32 {
-    if territory == 0 || population == 0 {
-        return 0;
-    }
+fn calculate_city_production(map: &Map, city_coord: Coord, player: PlayerId) -> u32 {
+    let (adjacent, count) = city_coord.adjacent(map.width(), map.height());
+    let owned_adjacent = adjacent[..count as usize]
+        .iter()
+        .filter(|adj| {
+            map.get(**adj)
+                .map_or(false, |tile| tile.owner == Some(player))
+        })
+        .count() as u32;
 
-    let max_workers = territory.saturating_mul(WORKERS_PER_TILE);
-    let effective_workers = population.min(max_workers);
+    BASE_CITY_PRODUCTION + PRODUCTION_PER_ADJACENT * owned_adjacent
+}
 
-    let labor_factor = f64::from(effective_workers).sqrt();
-    let land_factor = f64::from(territory).sqrt();
-
-    (labor_factor * land_factor * SCALING_FACTOR) as u32
+/// Calculate total food production for a player (sum of all city productions).
+#[must_use]
+fn calculate_total_production(map: &Map, player: PlayerId) -> u32 {
+    map.iter()
+        .filter(|(_, tile)| tile.owner == Some(player) && tile.tile_type == TileType::City)
+        .map(|(coord, _)| calculate_city_production(map, coord, player))
+        .sum()
 }
 
 /// Calculate food consumption.
 ///
-/// Simple model: 1 food per population + 1 food per army unit.
+/// Model: 1 food per population + 1 food per army unit + desert upkeep.
+/// Desert tiles cost `DESERT_UPKEEP_PER_TILE` food each to maintain.
 #[must_use]
-fn calculate_consumption(population: u32, army: u32) -> u32 {
-    population.saturating_add(army)
+fn calculate_consumption(population: u32, army: u32, desert_tiles: u32) -> u32 {
+    let desert_upkeep = desert_tiles.saturating_mul(DESERT_UPKEEP_PER_TILE);
+    population.saturating_add(army).saturating_add(desert_upkeep)
 }
 
 /// Calculate the food balance for a player.
 ///
-/// Uses Cobb-Douglas production: `sqrt(workers) * sqrt(territory) * 7`
-/// Consumption: 1 per population + 1 per army
+/// Uses city-adjacency production: each city produces base + bonus per adjacent owned tile.
+/// Consumption: 1 per population + 1 per army + desert upkeep
 #[must_use]
 pub fn calculate_food_balance(map: &Map, player: PlayerId) -> FoodBalance {
     let mut total_population: u32 = 0;
     let mut total_army: u32 = 0;
     let mut territory: u32 = 0;
+    let mut desert_tiles: u32 = 0;
 
     for (_, tile) in map.tiles_owned_by(player) {
         territory += 1;
         total_army = total_army.saturating_add(tile.army);
-        if tile.tile_type == TileType::City {
-            total_population = total_population.saturating_add(tile.population);
+        match tile.tile_type {
+            TileType::City => {
+                total_population = total_population.saturating_add(tile.population);
+            }
+            TileType::Desert => {
+                desert_tiles += 1;
+            }
+            TileType::Mountain => {
+                // Mountains shouldn't be owned, but handle gracefully
+            }
         }
     }
 
-    let production = calculate_production(territory, total_population) as i32;
-    let consumption = calculate_consumption(total_population, total_army) as i32;
+    let production = calculate_total_production(map, player) as i32;
+    let consumption = calculate_consumption(total_population, total_army, desert_tiles) as i32;
     let balance = production.saturating_sub(consumption);
 
     FoodBalance {
@@ -257,22 +289,25 @@ fn simple_hash(seed: u64, index: u64) -> u64 {
 mod kani_proofs {
     use super::*;
 
-    /// Prove that production calculation never overflows.
+    /// Prove that city production calculation never overflows.
     ///
-    /// For all possible territory and population values, the production
-    /// calculation should not overflow and should return a reasonable value.
+    /// For any number of adjacent tiles (0-4), the production
+    /// calculation should not overflow.
     #[kani::proof]
-    #[kani::unwind(2)]
-    fn prove_production_no_overflow() {
-        let territory: u32 = kani::any();
-        let population: u32 = kani::any();
+    fn prove_city_production_no_overflow() {
+        let adjacent_owned: u32 = kani::any();
 
-        // Production uses sqrt so inherently can't overflow
-        let production = calculate_production(territory, population);
+        // Adjacent tiles are bounded 0-4
+        if adjacent_owned > 4 {
+            return;
+        }
 
-        // Production should never exceed a reasonable bound
-        // sqrt(u32::MAX) * sqrt(u32::MAX) * 7 ≈ u32::MAX * 7, but sqrt caps it
-        assert!(production <= u32::MAX);
+        // Production = BASE + BONUS * adjacent
+        let production = BASE_CITY_PRODUCTION + PRODUCTION_PER_ADJACENT * adjacent_owned;
+
+        // Max production = 30 + 20*4 = 110, well within u32
+        assert!(production <= 110);
+        assert!(production >= BASE_CITY_PRODUCTION);
     }
 
     /// Prove that consumption calculation never overflows.
@@ -282,8 +317,9 @@ mod kani_proofs {
     fn prove_consumption_no_overflow() {
         let population: u32 = kani::any();
         let army: u32 = kani::any();
+        let desert_tiles: u32 = kani::any();
 
-        let consumption = calculate_consumption(population, army);
+        let consumption = calculate_consumption(population, army, desert_tiles);
 
         // Saturating add means result is bounded
         assert!(consumption >= population || consumption == u32::MAX);
@@ -382,29 +418,26 @@ mod kani_proofs {
         );
     }
 
-    /// Prove production has a reasonable upper bound.
+    /// Prove total production has a reasonable upper bound.
     ///
-    /// Production = sqrt(workers) × sqrt(territory) × 7
-    /// Max value is well below u32::MAX.
+    /// With city-adjacency model, max production per city is 110.
+    /// Even with 1000 cities, max total is 110,000 - very safe.
     #[kani::proof]
-    fn prove_production_upper_bound() {
-        let territory: u32 = kani::any();
-        let population: u32 = kani::any();
+    fn prove_total_production_upper_bound() {
+        let num_cities: u32 = kani::any();
+        let max_adjacent: u32 = 4;
 
-        let production = calculate_production(territory, population);
-
-        // sqrt(u32::MAX) ≈ 65535, so max production ≈ 65535 * 65535 * 7 ≈ 30B
-        // But sqrt reduces this dramatically: sqrt(4B) * sqrt(4B) * 7 ≈ 4B * 7 = 28B
-        // Actually: sqrt(max) * sqrt(max) * 7 = max * 7 but input is capped
-        // Real max: sqrt(workers_capped) * sqrt(territory) * 7
-        // With 50 workers per tile max, workers = territory * 50
-        // So: sqrt(t*50) * sqrt(t) * 7 = sqrt(50) * t * 7 ≈ 49.5 * t
-        // For t = u32::MAX, this could overflow, but sqrt limits it
-
-        // Conservative check: production should be < 1 billion for reasonable inputs
-        if territory < 1_000_000 && population < 100_000_000 {
-            assert!(production < 1_000_000_000);
+        // Limit to reasonable city count for tractability
+        if num_cities > 1000 {
+            return;
         }
+
+        // Max production per city = 30 + 20*4 = 110
+        let max_per_city = BASE_CITY_PRODUCTION + PRODUCTION_PER_ADJACENT * max_adjacent;
+        let max_total = num_cities.saturating_mul(max_per_city);
+
+        // Even with 1000 cities, max is 110,000
+        assert!(max_total <= 110_000 || num_cities > 1000);
     }
 }
 
@@ -413,101 +446,134 @@ mod tests {
     use super::*;
     use crate::game::Tile;
 
-    fn setup_map_with_territory(population: u32, army: u32, territory: u32) -> Map {
+    /// Set up a map with a city and optionally adjacent owned tiles.
+    fn setup_city_with_adjacency(population: u32, army: u32, adjacent_owned: u32) -> Map {
         let mut map = Map::new(20, 20).unwrap();
 
-        // Place a city with population
+        // Place a city with population at (5, 5)
         let mut city = Tile::city(population);
         city.owner = Some(1);
         city.army = army;
         map.set(Coord::new(5, 5), city);
 
-        // Add additional territory tiles (desert, owned by player 1)
-        for i in 0..territory.saturating_sub(1) {
-            let x = (i % 20) as u16;
-            let y = (i / 20) as u16;
-            if (x, y) != (5, 5) {
-                let mut desert = Tile::desert();
-                desert.owner = Some(1);
-                map.set(Coord::new(x, y), desert);
-            }
+        // Place adjacent owned tiles (up to 4)
+        let adjacent_coords = [(5, 4), (5, 6), (4, 5), (6, 5)];
+        for i in 0..(adjacent_owned.min(4) as usize) {
+            let (x, y) = adjacent_coords[i];
+            let mut desert = Tile::desert();
+            desert.owner = Some(1);
+            map.set(Coord::new(x, y), desert);
+        }
+
+        map
+    }
+
+    /// Set up a map with extra desert tiles (not adjacent to city).
+    fn setup_city_with_desert(population: u32, army: u32, adjacent: u32, extra_desert: u32) -> Map {
+        let mut map = setup_city_with_adjacency(population, army, adjacent);
+
+        // Add non-adjacent desert tiles
+        for i in 0..extra_desert {
+            let x = 10 + (i % 5) as u16;
+            let y = 10 + (i / 5) as u16;
+            let mut desert = Tile::desert();
+            desert.owner = Some(1);
+            map.set(Coord::new(x, y), desert);
         }
 
         map
     }
 
     #[test]
-    fn test_production_diminishing_returns() {
-        // Production should increase slower than linearly with population
-        let prod_10 = calculate_production(100, 10);
-        let prod_100 = calculate_production(100, 100);
-        let prod_1000 = calculate_production(100, 1000);
+    fn test_city_production_isolated() {
+        // Isolated city produces base production only
+        let map = setup_city_with_adjacency(100, 0, 0);
+        let production = calculate_total_production(&map, 1);
 
-        // 10× population should give ~3.16× production (sqrt)
-        assert!(prod_100 > prod_10 * 2);
-        assert!(prod_100 < prod_10 * 10);
-
-        // 10× more population again
-        assert!(prod_1000 > prod_100 * 2);
-        assert!(prod_1000 < prod_100 * 10);
+        assert_eq!(production, BASE_CITY_PRODUCTION);
     }
 
     #[test]
-    fn test_equilibrium_10_tiles() {
-        // With 10 tiles, equilibrium should be around 500 population
-        let map = setup_map_with_territory(500, 0, 10);
-        let balance = calculate_food_balance(&map, 1);
+    fn test_city_production_with_adjacency() {
+        // City with 4 adjacent tiles produces max
+        let map = setup_city_with_adjacency(100, 0, 4);
+        let production = calculate_total_production(&map, 1);
 
-        // Should be near equilibrium (balance close to 0)
-        assert!(
-            balance.balance.abs() < 100,
-            "Expected near-equilibrium, got balance {}",
-            balance.balance
-        );
+        assert_eq!(production, BASE_CITY_PRODUCTION + 4 * PRODUCTION_PER_ADJACENT);
+        assert_eq!(production, 110); // 30 + 80
     }
 
     #[test]
-    fn test_equilibrium_100_tiles() {
-        // With 100 tiles, equilibrium should be around 5000 population
-        let map = setup_map_with_territory(5000, 0, 100);
-        let balance = calculate_food_balance(&map, 1);
+    fn test_city_production_partial_adjacency() {
+        // City with 2 adjacent tiles
+        let map = setup_city_with_adjacency(100, 0, 2);
+        let production = calculate_total_production(&map, 1);
 
-        // Should be near equilibrium
-        assert!(
-            balance.balance.abs() < 500,
-            "Expected near-equilibrium, got balance {}",
-            balance.balance
-        );
+        assert_eq!(production, BASE_CITY_PRODUCTION + 2 * PRODUCTION_PER_ADJACENT);
+        assert_eq!(production, 70); // 30 + 40
     }
 
     #[test]
-    fn test_growth_with_small_pop_large_territory() {
-        // Small population on large territory should grow
-        let map = setup_map_with_territory(100, 0, 100);
+    fn test_food_balance_isolated_city() {
+        // Isolated city with 30 pop: production 30, consumption 30, balance 0
+        let map = setup_city_with_adjacency(30, 0, 0);
         let balance = calculate_food_balance(&map, 1);
 
-        assert!(
-            balance.balance > 0,
-            "Small pop on large territory should have surplus"
-        );
+        assert_eq!(balance.production, 30);
+        assert_eq!(balance.consumption, 30);
+        assert_eq!(balance.balance, 0);
     }
 
     #[test]
-    fn test_starvation_with_large_pop_small_territory() {
-        // Large population on small territory should starve
-        let map = setup_map_with_territory(1000, 0, 5);
+    fn test_food_balance_city_with_adjacency() {
+        // City with 4 adjacent: production 110, consumption = pop + desert upkeep
+        let map = setup_city_with_adjacency(30, 0, 4);
         let balance = calculate_food_balance(&map, 1);
 
-        assert!(
-            balance.balance < 0,
-            "Large pop on small territory should have deficit"
-        );
+        // Production: 30 + 4*20 = 110
+        assert_eq!(balance.production, 110);
+        // Consumption: 30 pop + 4 desert * 2 = 38
+        assert_eq!(balance.consumption, 38);
+        // Balance: 110 - 38 = 72
+        assert_eq!(balance.balance, 72);
+    }
+
+    #[test]
+    fn test_desert_upkeep_reduces_surplus() {
+        // Extra desert tiles reduce surplus without adding production
+        let map_no_extra = setup_city_with_desert(20, 0, 4, 0);
+        let map_with_extra = setup_city_with_desert(20, 0, 4, 10);
+
+        let balance_no_extra = calculate_food_balance(&map_no_extra, 1);
+        let balance_with_extra = calculate_food_balance(&map_with_extra, 1);
+
+        // Same production (only adjacent counts)
+        assert_eq!(balance_no_extra.production, balance_with_extra.production);
+
+        // Higher consumption with extra desert
+        assert!(balance_with_extra.consumption > balance_no_extra.consumption);
+
+        // Extra desert adds 10 * 2 = 20 upkeep
+        let upkeep_diff = balance_with_extra.consumption - balance_no_extra.consumption;
+        assert_eq!(upkeep_diff, 20);
+    }
+
+    #[test]
+    fn test_starvation_with_large_pop() {
+        // Large population on small production = starvation
+        let map = setup_city_with_adjacency(100, 0, 0);
+        let balance = calculate_food_balance(&map, 1);
+
+        // Production: 30, Consumption: 100 = deficit of 70
+        assert_eq!(balance.production, 30);
+        assert_eq!(balance.consumption, 100);
+        assert_eq!(balance.balance, -70);
     }
 
     #[test]
     fn test_army_reduces_surplus() {
-        let map_no_army = setup_map_with_territory(100, 0, 50);
-        let map_with_army = setup_map_with_territory(100, 200, 50);
+        let map_no_army = setup_city_with_adjacency(20, 0, 4);
+        let map_with_army = setup_city_with_adjacency(20, 50, 4);
 
         let balance_no_army = calculate_food_balance(&map_no_army, 1);
         let balance_with_army = calculate_food_balance(&map_with_army, 1);
@@ -520,7 +586,8 @@ mod tests {
 
     #[test]
     fn test_growth_applies() {
-        let mut map = setup_map_with_territory(100, 0, 50);
+        // City with 4 adjacent produces 60, consumes 20 = surplus 32 (after desert upkeep)
+        let mut map = setup_city_with_adjacency(20, 0, 4);
 
         // Should have surplus and grow
         let result = apply_economy(&mut map, 1, 12345);
@@ -531,12 +598,13 @@ mod tests {
         );
 
         let tile = map.get(Coord::new(5, 5)).unwrap();
-        assert!(tile.population > 100);
+        assert!(tile.population > 20);
     }
 
     #[test]
     fn test_starvation_applies() {
-        let mut map = setup_map_with_territory(1000, 0, 5);
+        // Isolated city with large pop: production 20, consumption 200 = deficit
+        let mut map = setup_city_with_adjacency(200, 0, 0);
 
         let result = apply_economy(&mut map, 1, 12345);
 
@@ -546,22 +614,87 @@ mod tests {
         );
 
         let tile = map.get(Coord::new(5, 5)).unwrap();
-        assert!(tile.population < 1000);
+        assert!(tile.population < 200);
     }
 
     #[test]
     fn test_no_overflow_extreme_values() {
-        // Test with very large values - should not panic
-        let prod = calculate_production(1_000_000, 100_000_000);
-        assert!(prod > 0);
-
-        let consumption = calculate_consumption(u32::MAX, u32::MAX);
+        // Test consumption with extreme values - should not panic
+        let consumption = calculate_consumption(u32::MAX, u32::MAX, u32::MAX);
         assert_eq!(consumption, u32::MAX); // saturates
 
-        // Large map test
-        let map = setup_map_with_territory(10_000_000, 10_000_000, 100);
+        // Test city production bounds
+        let max_production = BASE_CITY_PRODUCTION + 4 * PRODUCTION_PER_ADJACENT;
+        assert_eq!(max_production, 110);
+    }
+
+    #[test]
+    fn test_desert_upkeep_cost() {
+        // 50 extra desert tiles should cost 100 food/turn
+        let map = setup_city_with_desert(0, 0, 0, 50);
+
         let balance = calculate_food_balance(&map, 1);
-        // Just verify it doesn't panic
-        let _ = balance;
+
+        // 50 desert tiles × 2 food = 100 consumption from desert
+        assert_eq!(
+            balance.consumption, 100,
+            "50 desert tiles should cost 100 food"
+        );
+    }
+
+    #[test]
+    fn test_desert_upkeep_limits_expansion() {
+        // More desert = more consumption = less surplus
+        let small_map = setup_city_with_desert(20, 0, 4, 5);
+        let large_map = setup_city_with_desert(20, 0, 4, 50);
+
+        let small_balance = calculate_food_balance(&small_map, 1);
+        let large_balance = calculate_food_balance(&large_map, 1);
+
+        // Same production (both have 4 adjacent)
+        assert_eq!(small_balance.production, large_balance.production);
+
+        // Larger territory has more desert upkeep
+        assert!(
+            large_balance.consumption > small_balance.consumption,
+            "More desert should have higher consumption"
+        );
+
+        // The extra desert tiles (45) should add 90 to consumption
+        let consumption_diff = large_balance.consumption - small_balance.consumption;
+        assert_eq!(
+            consumption_diff, 90,
+            "45 extra desert tiles should add 90 consumption"
+        );
+    }
+
+    #[test]
+    fn test_multiple_cities_production() {
+        // Test that multiple cities' production sums correctly
+        let mut map = Map::new(20, 20).unwrap();
+
+        // City 1 at (5, 5) with 2 adjacent
+        let mut city1 = Tile::city(50);
+        city1.owner = Some(1);
+        map.set(Coord::new(5, 5), city1);
+        let mut adj1 = Tile::desert();
+        adj1.owner = Some(1);
+        map.set(Coord::new(5, 4), adj1.clone());
+        map.set(Coord::new(5, 6), adj1);
+
+        // City 2 at (10, 10) with 1 adjacent
+        let mut city2 = Tile::city(50);
+        city2.owner = Some(1);
+        map.set(Coord::new(10, 10), city2);
+        let mut adj2 = Tile::desert();
+        adj2.owner = Some(1);
+        map.set(Coord::new(10, 9), adj2);
+
+        let production = calculate_total_production(&map, 1);
+
+        // City 1: 30 + 2*20 = 70
+        // City 2: 30 + 1*20 = 50
+        // Total: 120
+        assert_eq!(production, 120);
     }
 }

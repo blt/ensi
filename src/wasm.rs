@@ -311,6 +311,29 @@ impl BotState {
         }
         tile.population > self.capital_population
     }
+
+    /// Validate an abandon command.
+    ///
+    /// Rules:
+    /// - Player must own the tile
+    /// - Cannot abandon the capital
+    #[inline]
+    pub(crate) fn validate_abandon(&self, coord: Coord) -> bool {
+        // Cannot abandon the capital
+        if self.capital == Some(coord) {
+            return false;
+        }
+
+        // SAFETY: Called only during run_turn when map_ptr is valid
+        let map = unsafe { self.map() };
+
+        let Some(tile) = map.get(coord) else {
+            return false;
+        };
+
+        // Must own the tile
+        tile.owner == Some(self.player_id)
+    }
 }
 
 /// Base address in WASM linear memory for the tile map.

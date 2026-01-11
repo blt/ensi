@@ -532,6 +532,22 @@ impl GameRunner {
             Command::MoveCapital { new_capital } => {
                 self.game_state.try_move_capital(player_id, new_capital);
             }
+            Command::Abandon { coord } => {
+                // Abandon the tile (set owner to None, army to 0)
+                // Cannot abandon capital - validated at syscall time
+                let is_capital = self
+                    .game_state
+                    .get_player(player_id)
+                    .is_some_and(|p| p.capital == coord);
+                if !is_capital {
+                    if let Some(tile) = self.game_state.map.get_mut(coord) {
+                        if tile.owner == Some(player_id) {
+                            tile.owner = None;
+                            tile.army = 0;
+                        }
+                    }
+                }
+            }
             Command::Yield => {
                 // No state change needed
             }

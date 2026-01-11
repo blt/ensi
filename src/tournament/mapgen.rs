@@ -9,6 +9,14 @@
 
 use crate::game::{Coord, Map, Player, PlayerId, Tile, TileType};
 
+/// Garrison strength for neutral desert tiles.
+/// Players need ~7 army to capture (with 25% defender bonus).
+const NEUTRAL_DESERT_GARRISON: u32 = 5;
+
+/// Garrison strength for neutral city tiles.
+/// Players need ~32 army to capture (with 25% defender bonus).
+const NEUTRAL_CITY_GARRISON: u32 = 25;
+
 /// Deterministic PRNG using xorshift64.
 #[derive(Debug, Clone, Copy)]
 struct Rng {
@@ -113,7 +121,7 @@ pub fn generate_map(
     Ok((map, players))
 }
 
-/// Generate terrain (mountains on ~10% of tiles).
+/// Generate terrain (mountains on ~10% of tiles, desert with garrisons).
 fn generate_terrain(map: &mut Map, rng: &mut Rng) {
     let width = map.width();
     let height = map.height();
@@ -125,8 +133,12 @@ fn generate_terrain(map: &mut Map, rng: &mut Rng) {
 
             if noise < 0.10 {
                 map.set(coord, Tile::mountain());
+            } else {
+                // Desert tiles get neutral garrison
+                let mut desert = Tile::desert();
+                desert.army = NEUTRAL_DESERT_GARRISON;
+                map.set(coord, desert);
             }
-            // Otherwise keep as desert (default)
         }
     }
 }
@@ -167,9 +179,11 @@ fn place_neutral_cities(map: &mut Map, rng: &mut Rng) {
 
             if let Some(tile) = map.get(coord)
                 && tile.tile_type == TileType::Desert {
-                    // Place neutral city with random population
+                    // Place neutral city with random population and garrison
                     let population = 50 + rng.next_u32(100);
-                    map.set(coord, Tile::city(population));
+                    let mut city = Tile::city(population);
+                    city.army = NEUTRAL_CITY_GARRISON;
+                    map.set(coord, city);
                     placed += 1;
                 }
         }
@@ -247,10 +261,13 @@ fn find_starting_positions(
 /// - Capital city with 100 population and 10 army
 /// - 4 adjacent territory tiles (for stable starting economy)
 ///
-/// With 5 territory tiles, starting food balance is positive:
-/// - production = sqrt(100) × sqrt(5) × 7 ≈ 156
-/// - consumption = 100 + 10 = 110
-/// - balance = +46 (sustainable growth)
+/// With city-adjacency production model:
+/// - production = 30 base + 20 × 4 adjacent = 110
+/// - consumption = 100 pop + 10 army = 110
+/// - upkeep = 4 desert × 2 = 8
+/// - balance = 110 - 110 - 8 = -8
+///
+/// Starting economy is slightly negative, encouraging early expansion.
 fn create_players(map: &mut Map, starting_positions: &[Coord]) -> Vec<Player> {
     let mut players = Vec::with_capacity(starting_positions.len());
     let width = map.width();
@@ -452,10 +469,11 @@ mod tests {
         for player in &players {
             let balance = calculate_food_balance(&map, player.id);
 
-            // Starting balance should be positive (sustainable)
+            // Starting balance may be slightly negative (encouraging early expansion)
+            // but should not be severely negative (max -20 allows several turns to act)
             assert!(
-                balance.balance >= 0,
-                "Player {} should have non-negative food balance, got {}",
+                balance.balance >= -20,
+                "Player {} has unsustainable starting economy: balance {}",
                 player.id,
                 balance.balance
             );

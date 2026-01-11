@@ -126,6 +126,7 @@ proptest! {
     }
 
     /// Combat produces valid results (winner is correct, army is bounded).
+    /// Defender gets 25% combat advantage.
     #[test]
     fn prop_combat_valid_results(
         att_army in 1u32..1_000_000,
@@ -154,20 +155,25 @@ proptest! {
             att_army.max(def_army)
         );
 
-        // Verify winner is correct
-        if att_army > def_army {
-            prop_assert!(attacker_won, "Attacker should win when stronger");
+        // Defender's 25% combat advantage
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let effective_defense = (f64::from(def_army) * 1.25) as u32;
+
+        // Verify winner is correct (attacker must overcome effective defense)
+        if att_army > effective_defense {
+            prop_assert!(attacker_won, "Attacker should win when stronger than effective defense");
             prop_assert_eq!(result_tile.owner, Some(1));
-            prop_assert_eq!(result_tile.army, att_army - def_army);
-        } else if def_army > att_army {
-            prop_assert!(!attacker_won, "Defender should win when stronger");
+            prop_assert_eq!(result_tile.army, att_army.saturating_sub(effective_defense));
+        } else if att_army < effective_defense {
+            prop_assert!(!attacker_won, "Defender should win with effective bonus");
             prop_assert_eq!(result_tile.owner, Some(2));
-            prop_assert_eq!(result_tile.army, def_army - att_army);
+            // Defender loses raw attacker troops, not effective
+            prop_assert_eq!(result_tile.army, def_army.saturating_sub(att_army));
         } else {
-            // Tie
-            prop_assert!(!attacker_won, "Tie should not count as attacker win");
-            prop_assert_eq!(result_tile.owner, None, "Tie should make tile neutral");
-            prop_assert_eq!(result_tile.army, 0, "Tie should destroy all armies");
+            // Tie at effective level - defender wins
+            prop_assert!(!attacker_won, "Tie goes to defender");
+            prop_assert_eq!(result_tile.owner, Some(2));
+            prop_assert_eq!(result_tile.army, def_army.saturating_sub(att_army));
         }
     }
 

@@ -38,6 +38,7 @@ pub(super) fn register_host_functions(linker: &mut Linker<BotState>) -> Result<(
     linker.func_wrap("env", "ensi_move", ensi_move)?;
     linker.func_wrap("env", "ensi_convert", ensi_convert)?;
     linker.func_wrap("env", "ensi_move_capital", ensi_move_capital)?;
+    linker.func_wrap("env", "ensi_abandon", ensi_abandon)?;
     linker.func_wrap("env", "ensi_yield", ensi_yield)?;
 
     Ok(())
@@ -164,6 +165,23 @@ fn ensi_move_capital(mut caller: Caller<'_, BotState>, city_x: i32, city_y: i32)
         }
     } else {
         1 // Invalid
+    }
+}
+
+/// Abandon a tile (relinquish ownership).
+/// Returns 0 on success, 1 on failure.
+fn ensi_abandon(mut caller: Caller<'_, BotState>, x: i32, y: i32) -> i32 {
+    let coord = Coord::new(x as u16, y as u16);
+
+    if caller.data().validate_abandon(coord) {
+        let cmd = Command::Abandon { coord };
+        if caller.data_mut().push_command(cmd) {
+            0
+        } else {
+            1 // Buffer full
+        }
+    } else {
+        1 // Invalid (not owned or is capital)
     }
 }
 

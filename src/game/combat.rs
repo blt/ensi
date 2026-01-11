@@ -1,8 +1,15 @@
 //! Combat resolution.
+//!
+//! Defenders receive a 25% combat bonus to make defensive positioning meaningful.
+//! This creates strategic tradeoffs between aggressive expansion and consolidation.
 
 use std::cmp::Ordering;
 
 use crate::game::{Coord, Map, PlayerId};
+
+/// Defender's combat advantage multiplier.
+/// At 0.25, defenders effectively have 125% strength (attacker needs 1.25x army to win).
+const DEFENDER_BONUS: f64 = 0.25;
 
 /// Result of combat on a single tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,11 +137,15 @@ pub fn process_attack(
         return true;
     }
 
-    // Combat resolution
-    match attacking_army.cmp(&defending_army) {
+    // Combat resolution with defender's advantage
+    // Defender gets +25% effective strength
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let effective_defending = (f64::from(defending_army) * (1.0 + DEFENDER_BONUS)) as u32;
+
+    match attacking_army.cmp(&effective_defending) {
         Ordering::Greater => {
-            // Attacker wins
-            let remaining = attacking_army - defending_army;
+            // Attacker wins - remaining is attack minus effective defense
+            let remaining = attacking_army.saturating_sub(effective_defending);
             if let Some(to_tile) = map.get_mut(to) {
                 to_tile.owner = Some(attacker_owner);
                 to_tile.army = remaining;
@@ -142,18 +153,19 @@ pub fn process_attack(
             true
         }
         Ordering::Less => {
-            // Defender wins
-            let remaining = defending_army - attacking_army;
+            // Defender wins - remaining is based on raw defending army minus attack
+            // (defender doesn't lose bonus troops, just real ones)
+            let remaining = defending_army.saturating_sub(attacking_army);
             if let Some(to_tile) = map.get_mut(to) {
                 to_tile.army = remaining;
             }
             false
         }
         Ordering::Equal => {
-            // Tie - both destroyed, tile becomes neutral
+            // Tie at effective level - defender wins with reduced army
+            let remaining = defending_army.saturating_sub(attacking_army);
             if let Some(to_tile) = map.get_mut(to) {
-                to_tile.owner = None;
-                to_tile.army = 0;
+                to_tile.army = remaining;
             }
             false
         }
@@ -263,7 +275,9 @@ mod tests {
 
         let result_tile = map.get(to).unwrap();
         assert_eq!(result_tile.owner, Some(1));
-        assert_eq!(result_tile.army, 3);
+        // With 25% defender bonus: 7 * 1.25 = 8.75 ≈ 8 effective defense
+        // Remaining: 10 - 8 = 2
+        assert_eq!(result_tile.army, 2);
     }
 
     #[test]
@@ -312,5 +326,82 @@ mod tests {
         let result_tile = map.get(to).unwrap();
         assert_eq!(result_tile.owner, Some(1));
         assert_eq!(result_tile.army, 15);
+    }
+
+    #[test]
+    fn test_defender_advantage_equal_armies() {
+        // Equal armies: defender should win due to 25% bonus
+        let mut map = Map::new(10, 10).unwrap();
+        let from = Coord::new(0, 0);
+        let to = Coord::new(1, 0);
+
+        let mut attacker_tile = Tile::desert();
+        attacker_tile.owner = Some(1);
+        attacker_tile.army = 100;
+        map.set(from, attacker_tile);
+
+        let mut defender_tile = Tile::desert();
+        defender_tile.owner = Some(2);
+        defender_tile.army = 100;
+        map.set(to, defender_tile);
+
+        // Attack with 100 vs 100 defenders (effective 125 with bonus)
+        let success = process_attack(&mut map, from, to, 100);
+        assert!(!success, "Equal armies: defender should win with 25% bonus");
+
+        let result_tile = map.get(to).unwrap();
+        assert_eq!(result_tile.owner, Some(2), "Defender should retain ownership");
+        // Defender loses attacker's army but keeps their troops
+        assert_eq!(result_tile.army, 0, "Defender loses troops equal to attack");
+    }
+
+    #[test]
+    fn test_defender_advantage_breakeven() {
+        // Attacker needs 1.25x army to win
+        let mut map = Map::new(10, 10).unwrap();
+        let from = Coord::new(0, 0);
+        let to = Coord::new(1, 0);
+
+        let mut attacker_tile = Tile::desert();
+        attacker_tile.owner = Some(1);
+        attacker_tile.army = 125;
+        map.set(from, attacker_tile);
+
+        let mut defender_tile = Tile::desert();
+        defender_tile.owner = Some(2);
+        defender_tile.army = 100;
+        map.set(to, defender_tile);
+
+        // 125 attackers vs 100 defenders (effective 125 with bonus)
+        // Equal at effective level = defender wins (tie goes to defender)
+        let success = process_attack(&mut map, from, to, 125);
+        assert!(!success, "Tie at effective level goes to defender");
+    }
+
+    #[test]
+    fn test_defender_advantage_attacker_needs_margin() {
+        // Attacker needs more than 1.25x to win
+        let mut map = Map::new(10, 10).unwrap();
+        let from = Coord::new(0, 0);
+        let to = Coord::new(1, 0);
+
+        let mut attacker_tile = Tile::desert();
+        attacker_tile.owner = Some(1);
+        attacker_tile.army = 126;
+        map.set(from, attacker_tile);
+
+        let mut defender_tile = Tile::desert();
+        defender_tile.owner = Some(2);
+        defender_tile.army = 100;
+        map.set(to, defender_tile);
+
+        // 126 attackers vs 100 defenders (effective 125)
+        let success = process_attack(&mut map, from, to, 126);
+        assert!(success, "Attacker wins with margin above 1.25x");
+
+        let result_tile = map.get(to).unwrap();
+        assert_eq!(result_tile.owner, Some(1));
+        // 126 - 125 = 1 remaining
+        assert_eq!(result_tile.army, 1);
     }
 }

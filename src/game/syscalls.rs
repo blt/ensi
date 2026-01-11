@@ -33,6 +33,8 @@ pub mod syscall {
     pub const MOVE_CAPITAL: u32 = 102;
     /// End turn early.
     pub const YIELD: u32 = 103;
+    /// Abandon a tile (set owner to None, useful for reducing desert upkeep).
+    pub const ABANDON: u32 = 104;
 }
 
 /// A command issued by a player during their turn.
@@ -58,6 +60,11 @@ pub enum Command {
     MoveCapital {
         /// New capital coordinate.
         new_capital: Coord,
+    },
+    /// Abandon a tile (relinquish ownership).
+    Abandon {
+        /// Tile to abandon.
+        coord: Coord,
     },
     /// End turn early.
     Yield,
@@ -257,6 +264,30 @@ impl<'a> GameSyscallHandler<'a> {
 
         new_tile.population > current_pop
     }
+
+    /// Validate an abandon command.
+    ///
+    /// Rules:
+    /// - Player must own the tile
+    /// - Cannot abandon the capital
+    #[must_use]
+    pub fn validate_abandon(&self, coord: Coord) -> bool {
+        let Some(player) = self.game_state.get_player(self.player_id) else {
+            return false;
+        };
+
+        // Cannot abandon the capital
+        if coord == player.capital {
+            return false;
+        }
+
+        let Some(tile) = self.game_state.map.get(coord) else {
+            return false;
+        };
+
+        // Must own the tile
+        tile.owner == Some(self.player_id)
+    }
 }
 
 #[cfg(test)]
@@ -339,5 +370,29 @@ mod tests {
         assert!(!handler.has_yielded());
         handler.set_yielded(true);
         assert!(handler.has_yielded());
+    }
+
+    #[test]
+    fn test_validate_abandon_owned_tile() {
+        let state = create_test_state();
+        let handler = create_handler(&state, 1);
+        // Desert tile at (3, 2) is owned by player 1
+        assert!(handler.validate_abandon(Coord::new(3, 2)));
+    }
+
+    #[test]
+    fn test_validate_abandon_capital() {
+        let state = create_test_state();
+        let handler = create_handler(&state, 1);
+        // Capital at (2, 2) cannot be abandoned
+        assert!(!handler.validate_abandon(Coord::new(2, 2)));
+    }
+
+    #[test]
+    fn test_validate_abandon_not_owned() {
+        let state = create_test_state();
+        let handler = create_handler(&state, 1);
+        // Tile at (0, 0) is not owned by player 1
+        assert!(!handler.validate_abandon(Coord::new(0, 0)));
     }
 }

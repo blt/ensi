@@ -294,37 +294,18 @@ impl GameState {
             }
         }
 
-        // Compute food balance for each player using the collected stats
-        for stats in &mut result.stats {
-            if stats.territory > 0 {
-                // Use the same formula as calculate_food_balance
-                let production = Self::calculate_production(stats.territory, stats.population);
-                let consumption = stats.population.saturating_add(stats.army);
-                stats.food_balance = (production as i32).saturating_sub(consumption as i32);
+        // Compute food balance for each player using the adjacency-based production model.
+        // We use calculate_food_balance from the economy module to get accurate production
+        // based on city adjacency, not just territory count.
+        for player_id in 1..=MAX_PLAYERS as u8 {
+            let idx = (player_id - 1) as usize;
+            if result.stats[idx].territory > 0 {
+                let balance = crate::game::economy::calculate_food_balance(&self.map, player_id);
+                result.stats[idx].food_balance = balance.balance;
             }
         }
 
         result
-    }
-
-    /// Calculate production using the Cobb-Douglas formula.
-    ///
-    /// This is the same formula used in economy.rs.
-    fn calculate_production(territory: u32, population: u32) -> u32 {
-        const WORKERS_PER_TILE: u32 = 50;
-        const SCALING_FACTOR: f64 = 7.0;
-
-        if territory == 0 || population == 0 {
-            return 0;
-        }
-
-        let max_workers = territory.saturating_mul(WORKERS_PER_TILE);
-        let effective_workers = population.min(max_workers);
-
-        let labor_factor = f64::from(effective_workers).sqrt();
-        let land_factor = f64::from(territory).sqrt();
-
-        (labor_factor * land_factor * SCALING_FACTOR) as u32
     }
 
     /// Try to move a player's capital to a new city.

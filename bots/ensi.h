@@ -147,6 +147,18 @@ extern int ensi_convert(int city_x, int city_y, int count);
 extern int ensi_move_capital(int city_x, int city_y);
 
 /**
+ * Abandon a tile (relinquish ownership).
+ *
+ * The tile must be owned by this player and cannot be the capital.
+ * Useful for reducing desert upkeep costs.
+ *
+ * @param x Tile X coordinate.
+ * @param y Tile Y coordinate.
+ * @return 0 on success, 1 on failure.
+ */
+extern int ensi_abandon(int x, int y);
+
+/**
  * End turn early.
  *
  * Call this to stop execution and let other players take their turn.
@@ -326,6 +338,11 @@ static inline int convert_pop(Coord city, unsigned int count) {
 /** Move capital. */
 static inline int move_capital(Coord new_capital) {
     return ensi_move_capital(new_capital.x, new_capital.y);
+}
+
+/** Abandon a tile. */
+static inline int abandon_tile(Coord tile) {
+    return ensi_abandon(tile.x, tile.y);
 }
 
 /** End turn. */

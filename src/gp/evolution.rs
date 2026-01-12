@@ -139,8 +139,18 @@ pub fn evolve(config: &EvolutionConfig) -> Result<(Genome, EvolutionStats), Evol
             break;
         }
 
+        // Include best genome in population for fair comparison
+        // This ensures we compare against the same opponents each generation
+        let mut eval_population = population.clone();
+        let best_genome_idx = if generation > 0 {
+            eval_population.push(best_genome.clone());
+            Some(eval_population.len() - 1)
+        } else {
+            None
+        };
+
         // Compile entire population for tournament play
-        let compiled_population = compile_population(&population, &engine);
+        let compiled_population = compile_population(&eval_population, &engine);
 
         // Skip if we couldn't compile enough bots
         if compiled_population.len() < 2 {
@@ -154,8 +164,11 @@ pub fn evolve(config: &EvolutionConfig) -> Result<(Genome, EvolutionStats), Evol
         // Run tournament: each bot plays against all others
         let fitness = run_tournament(&compiled_population, &engine, &config.fitness);
 
-        // Calculate statistics
-        let stats = SelectionStats::from_fitness(&fitness);
+        // Get fitness values for original population (excluding best_genome if added)
+        let pop_fitness: Vec<f64> = fitness.iter().take(population.len()).copied().collect();
+
+        // Calculate statistics (on original population only)
+        let stats = SelectionStats::from_fitness(&pop_fitness);
         let gen_stat = GenerationStats {
             generation,
             best_fitness: stats.best_fitness,
@@ -164,12 +177,19 @@ pub fn evolve(config: &EvolutionConfig) -> Result<(Genome, EvolutionStats), Evol
         };
         gen_stats.push(gen_stat);
 
-        // Update best genome and save to permanent storage
-        if let Some((idx, &fit)) = fitness
+        // Update best genome: compare against same-generation fitness
+        // Find best from current generation's population
+        if let Some((idx, &fit)) = pop_fitness
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            && fit > best_fitness {
+        {
+            // Get previous best's fitness in this same tournament (fair comparison)
+            let prev_best_fit = best_genome_idx
+                .and_then(|i| fitness.get(i).copied())
+                .unwrap_or(0.0);
+
+            if fit > prev_best_fit {
                 best_fitness = fit;
                 best_genome = population[idx].clone();
                 best_generation = generation;
@@ -186,6 +206,7 @@ pub fn evolve(config: &EvolutionConfig) -> Result<(Genome, EvolutionStats), Evol
                     }
                 }
             }
+        }
 
         // Log progress
         if config.verbose {
@@ -200,7 +221,7 @@ pub fn evolve(config: &EvolutionConfig) -> Result<(Genome, EvolutionStats), Evol
             let checkpoint = Checkpoint {
                 generation: generation as u32,
                 population: population.clone(),
-                fitness: fitness.clone(),
+                fitness: pop_fitness.clone(),
                 best_fitness,
                 rng_seed: config.seed,
             };
@@ -216,9 +237,9 @@ pub fn evolve(config: &EvolutionConfig) -> Result<(Genome, EvolutionStats), Evol
             }
         }
 
-        // Selection
+        // Selection (use pop_fitness which excludes the re-evaluated best genome)
         let selection_result = select_parents(
-            &fitness,
+            &pop_fitness,
             &config.selection,
             config.population_size,
             &mut rng,
@@ -403,8 +424,13 @@ pub fn resume(
 
     // Continue evolution from checkpoint
     for generation in (checkpoint.generation as usize)..resume_config.generations {
+        // Include best genome in population for fair comparison
+        let mut eval_population = population.clone();
+        let best_genome_idx = eval_population.len();
+        eval_population.push(best_genome.clone());
+
         // Compile entire population for tournament play
-        let compiled_population = compile_population(&population, &engine);
+        let compiled_population = compile_population(&eval_population, &engine);
 
         // Skip if we couldn't compile enough bots
         if compiled_population.len() < 2 {
@@ -413,7 +439,10 @@ pub fn resume(
 
         // Run tournament
         let fitness = run_tournament(&compiled_population, &engine, &resume_config.fitness);
-        let stats = SelectionStats::from_fitness(&fitness);
+
+        // Get fitness values for original population only
+        let pop_fitness: Vec<f64> = fitness.iter().take(population.len()).copied().collect();
+        let stats = SelectionStats::from_fitness(&pop_fitness);
 
         gen_stats.push(GenerationStats {
             generation,
@@ -422,15 +451,19 @@ pub fn resume(
             fitness_std: stats.fitness_std,
         });
 
-        if let Some((idx, &fit)) = fitness
+        // Update best genome with fair comparison
+        if let Some((idx, &fit)) = pop_fitness
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            && fit > best_fitness {
+        {
+            let prev_best_fit = fitness.get(best_genome_idx).copied().unwrap_or(0.0);
+            if fit > prev_best_fit {
                 best_fitness = fit;
                 best_genome = population[idx].clone();
                 best_generation = generation;
             }
+        }
 
         if resume_config.verbose {
             eprintln!(
@@ -443,7 +476,7 @@ pub fn resume(
             let ckpt = Checkpoint {
                 generation: generation as u32,
                 population: population.clone(),
-                fitness: fitness.clone(),
+                fitness: pop_fitness.clone(),
                 best_fitness,
                 rng_seed: resume_config.seed,
             };
@@ -453,7 +486,7 @@ pub fn resume(
         }
 
         let selection_result = select_parents(
-            &fitness,
+            &pop_fitness,
             &resume_config.selection,
             resume_config.population_size,
             &mut rng,

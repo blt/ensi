@@ -16,6 +16,12 @@ pub const MAX_RULES: usize = 64;
 /// Number of constants in the constant pool.
 pub const NUM_CONSTANTS: usize = 16;
 
+/// Number of registers for in-turn state.
+pub(crate) const NUM_REGISTERS: usize = 8;
+
+/// Maximum iterations for Repeat action.
+pub(crate) const MAX_REPEAT: u32 = 16;
+
 /// A complete genome representing a bot's strategy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Genome {
@@ -110,6 +116,8 @@ pub enum Expr {
     IterX,
     /// Current iteration Y coordinate.
     IterY,
+    /// Read from register (0-7).
+    Reg(u8),
 
     // === Tile queries ===
     /// Tile type at reference (0=City, 1=Desert, 2=Mountain, 255=Fog).
@@ -201,7 +209,7 @@ impl Expr {
     /// Generate a random terminal (leaf) expression.
     #[must_use]
     pub fn random_terminal<R: Rng>(rng: &mut R) -> Self {
-        match rng.gen_range(0..14) {
+        match rng.gen_range(0..15) {
             0 => Self::Const(rng.gen_range(0..NUM_CONSTANTS as u8)),
             1 => Self::Turn,
             2 => Self::MyFood,
@@ -212,9 +220,10 @@ impl Expr {
             7 => Self::MapHeight,
             8 => Self::IterX,
             9 => Self::IterY,
-            10 => Self::TileType(TileRef::random(rng)),
-            11 => Self::TileOwner(TileRef::random(rng)),
-            12 => Self::TileArmy(TileRef::random(rng)),
+            10 => Self::Reg(rng.gen_range(0..NUM_REGISTERS as u8)),
+            11 => Self::TileType(TileRef::random(rng)),
+            12 => Self::TileOwner(TileRef::random(rng)),
+            13 => Self::TileArmy(TileRef::random(rng)),
             _ => Self::Const(rng.gen_range(0..NUM_CONSTANTS as u8)),
         }
     }
@@ -292,6 +301,7 @@ impl Expr {
             | Self::MapHeight
             | Self::IterX
             | Self::IterY
+            | Self::Reg(_)
             | Self::TileType(_)
             | Self::TileOwner(_)
             | Self::TileArmy(_) => 1,
@@ -369,6 +379,20 @@ pub enum Action {
         /// Target city for capital.
         city: TileRef,
     },
+    /// Store a value in a register.
+    Store {
+        /// Register index (0-7).
+        reg: u8,
+        /// Value to store.
+        value: Expr,
+    },
+    /// Repeat an action up to MAX_REPEAT times.
+    Repeat {
+        /// Number of iterations (capped at MAX_REPEAT).
+        count: Expr,
+        /// Action to repeat.
+        inner: Box<Action>,
+    },
     /// Skip this action (do nothing).
     Skip,
 }
@@ -377,8 +401,8 @@ impl Action {
     /// Generate a random action.
     #[must_use]
     pub fn random<R: Rng>(rng: &mut R) -> Self {
-        match rng.gen_range(0..10) {
-            // Move is most common (60%)
+        match rng.gen_range(0..14) {
+            // Move is most common (43%)
             0..=5 => Self::Move {
                 from: TileRef::IterTile,
                 to: TileRef::Relative(
@@ -391,7 +415,7 @@ impl Action {
                 ),
                 count: Expr::random(rng, 2),
             },
-            // Convert (20%)
+            // Convert (14%)
             6 | 7 => Self::Convert {
                 city: if rng.gen_bool(0.5) {
                     TileRef::Capital
@@ -400,9 +424,51 @@ impl Action {
                 },
                 count: Expr::random(rng, 2),
             },
-            // Move capital (10%)
+            // Move capital (7%)
             8 => Self::MoveCapital {
                 city: TileRef::random(rng),
+            },
+            // Store (14%)
+            9 | 10 => Self::Store {
+                reg: rng.gen_range(0..NUM_REGISTERS as u8),
+                value: Expr::random(rng, 2),
+            },
+            // Repeat (14%) - only simple actions inside to prevent deep nesting
+            11 | 12 => Self::Repeat {
+                count: Expr::random(rng, 1),
+                inner: Box::new(Self::random_simple(rng)),
+            },
+            // Skip (7%)
+            _ => Self::Skip,
+        }
+    }
+
+    /// Generate a simple (non-nested) random action for use inside Repeat.
+    #[must_use]
+    pub fn random_simple<R: Rng>(rng: &mut R) -> Self {
+        match rng.gen_range(0..10) {
+            // Move (50%)
+            0..=4 => Self::Move {
+                from: TileRef::IterTile,
+                to: TileRef::Relative(
+                    *[(-1, 0), (1, 0), (0, -1), (0, 1)]
+                        .choose(rng)
+                        .map_or(&0, |(dx, _)| dx),
+                    *[(-1, 0), (1, 0), (0, -1), (0, 1)]
+                        .choose(rng)
+                        .map_or(&0, |(_, dy)| dy),
+                ),
+                count: Expr::random(rng, 1),
+            },
+            // Convert (20%)
+            5 | 6 => Self::Convert {
+                city: TileRef::IterTile,
+                count: Expr::random(rng, 1),
+            },
+            // Store (20%)
+            7 | 8 => Self::Store {
+                reg: rng.gen_range(0..NUM_REGISTERS as u8),
+                value: Expr::random(rng, 1),
             },
             // Skip (10%)
             _ => Self::Skip,

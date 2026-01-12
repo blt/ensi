@@ -6,7 +6,7 @@
 // Mutation uses intentional casts for random number generation
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
-use crate::gp::genome::{Action, Expr, Genome, Rule, TileRef, MAX_RULES, NUM_CONSTANTS};
+use crate::gp::genome::{Action, Expr, Genome, Rule, TileRef, MAX_RULES, NUM_CONSTANTS, NUM_REGISTERS};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -173,6 +173,10 @@ fn mutate_expr<R: Rng>(expr: &mut Expr, config: &MutationConfig, rng: &mut R) {
                 mutate_expr(a, config, rng);
             }
         }
+        Expr::Reg(idx) => {
+            // Mutate register index
+            *idx = rng.gen_range(0..NUM_REGISTERS as u8);
+        }
         // Terminals that don't need mutation
         Expr::Turn
         | Expr::MyFood
@@ -244,6 +248,26 @@ fn mutate_action<R: Rng>(action: &mut Action, config: &MutationConfig, rng: &mut
                 mutate_tile_ref(city, rng);
             }
         }
+        Action::Store { reg, value } => {
+            if rng.gen_bool(0.3) {
+                *reg = rng.gen_range(0..NUM_REGISTERS as u8);
+            }
+            if rng.gen_bool(config.point_mutation_rate) {
+                mutate_expr(value, config, rng);
+            }
+        }
+        Action::Repeat { count, inner } => {
+            if rng.gen_bool(config.point_mutation_rate) {
+                mutate_expr(count, config, rng);
+            }
+            if rng.gen_bool(config.point_mutation_rate) {
+                mutate_action(inner, config, rng);
+            }
+            // Occasionally unwrap the repeat
+            if rng.gen_bool(0.1) {
+                *action = (**inner).clone();
+            }
+        }
         Action::Skip => {
             // Occasionally change to a different action
             if rng.gen_bool(0.1) {
@@ -282,6 +306,7 @@ fn replace_at_index(expr: &Expr, replacement: &Expr, mut index: usize) -> Option
         | Expr::MapHeight
         | Expr::IterX
         | Expr::IterY
+        | Expr::Reg(_)
         | Expr::TileType(_)
         | Expr::TileOwner(_)
         | Expr::TileArmy(_) => None,

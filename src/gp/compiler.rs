@@ -11,7 +11,7 @@
     clippy::trivially_copy_pass_by_ref
 )]
 
-use crate::gp::genome::{Action, Expr, Genome, TileRef, NUM_CONSTANTS};
+use crate::gp::genome::{Action, Expr, Genome, TileRef, MAX_REPEAT, NUM_CONSTANTS, NUM_REGISTERS};
 use wasm_encoder::{
     CodeSection, ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction,
     MemorySection, MemoryType, Module, TypeSection, ValType,
@@ -126,6 +126,7 @@ pub fn compile(genome: &Genome) -> Result<Vec<u8>, CompileError> {
         // 5: player_id
         // 6: temp
         // 7: temp2 (for nested expressions like Min/Max)
+        // 8: loop_counter (for Repeat action)
         (1, ValType::I32), // iter_x
         (1, ValType::I32), // iter_y
         (1, ValType::I32), // map_width
@@ -133,13 +134,28 @@ pub fn compile(genome: &Genome) -> Result<Vec<u8>, CompileError> {
         (1, ValType::I32), // player_id
         (1, ValType::I32), // temp
         (1, ValType::I32), // temp2
+        (1, ValType::I32), // loop_counter
     ]);
 
     // Store constants in memory at address 0
-    // Memory layout: [constants: 16 x i32][scratch space]
+    // Memory layout:
+    //   0x0000 - 0x003F: constants (16 x i32)
+    //   0x0040 - 0x005F: registers (8 x i32)
+    //   0x10000+: visibility map (pushed by host)
     for (i, &constant) in genome.constants.iter().enumerate() {
         func.instruction(&Instruction::I32Const(i as i32 * 4)); // Address
         func.instruction(&Instruction::I32Const(constant)); // Value
+        func.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0,
+        }));
+    }
+
+    // Initialize registers to zero at address 0x40
+    for i in 0..NUM_REGISTERS {
+        func.instruction(&Instruction::I32Const((0x40 + i * 4) as i32)); // Address
+        func.instruction(&Instruction::I32Const(0)); // Value = 0
         func.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
             offset: 0,
             align: 2,
@@ -285,6 +301,16 @@ fn compile_expr(func: &mut Function, expr: &Expr, genome: &Genome) {
         }
         Expr::IterY => {
             func.instruction(&Instruction::LocalGet(2));
+        }
+        Expr::Reg(idx) => {
+            // Load register from memory at 0x40 + idx * 4
+            let idx = (*idx as usize).min(NUM_REGISTERS - 1);
+            func.instruction(&Instruction::I32Const((0x40 + idx * 4) as i32));
+            func.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
         }
         Expr::TileType(tile_ref) => {
             compile_tile_ref_coords(func, tile_ref, genome);
@@ -533,6 +559,64 @@ fn compile_action(func: &mut Function, action: &Action, genome: &Genome) {
             compile_tile_ref_coords(func, city, genome);
             func.instruction(&Instruction::Call(11)); // ensi_move_capital
             func.instruction(&Instruction::Drop);
+        }
+        Action::Store { reg, value } => {
+            // Store value to register at 0x40 + reg * 4
+            let reg_addr = 0x40 + (*reg as usize).min(NUM_REGISTERS - 1) * 4;
+            func.instruction(&Instruction::I32Const(reg_addr as i32)); // Address
+            compile_expr(func, value, genome); // Value
+            func.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+        }
+        Action::Repeat { count, inner } => {
+            // Evaluate count and clamp to MAX_REPEAT
+            compile_expr(func, count, genome);
+            // Ensure count is in range [0, MAX_REPEAT]
+            func.instruction(&Instruction::LocalTee(6)); // save to temp
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::I32LtS); // count < 0?
+            func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::LocalSet(6)); // if negative, set to 0
+            func.instruction(&Instruction::End);
+            // Clamp to MAX_REPEAT
+            func.instruction(&Instruction::LocalGet(6));
+            func.instruction(&Instruction::I32Const(MAX_REPEAT as i32));
+            func.instruction(&Instruction::I32GtS); // count > MAX_REPEAT?
+            func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            func.instruction(&Instruction::I32Const(MAX_REPEAT as i32));
+            func.instruction(&Instruction::LocalSet(6)); // if too large, set to MAX_REPEAT
+            func.instruction(&Instruction::End);
+            // Store clamped value in loop_counter
+            func.instruction(&Instruction::LocalGet(6));
+            func.instruction(&Instruction::LocalSet(8)); // loop_counter
+
+            // Loop structure
+            func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+            func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+
+            // Check if counter <= 0
+            func.instruction(&Instruction::LocalGet(8));
+            func.instruction(&Instruction::I32Const(0));
+            func.instruction(&Instruction::I32LeS);
+            func.instruction(&Instruction::BrIf(1)); // Exit if counter <= 0
+
+            // Execute inner action
+            compile_action(func, inner, genome);
+
+            // Decrement counter
+            func.instruction(&Instruction::LocalGet(8));
+            func.instruction(&Instruction::I32Const(1));
+            func.instruction(&Instruction::I32Sub);
+            func.instruction(&Instruction::LocalSet(8));
+
+            // Continue loop
+            func.instruction(&Instruction::Br(0));
+            func.instruction(&Instruction::End); // end loop
+            func.instruction(&Instruction::End); // end block
         }
         Action::Skip => {
             // Do nothing

@@ -135,6 +135,7 @@ fn select_subtree_at_index(expr: &Expr, mut index: usize) -> Option<Expr> {
         | Expr::MapHeight
         | Expr::IterX
         | Expr::IterY
+        | Expr::Reg(_)
         | Expr::TileType(_)
         | Expr::TileOwner(_)
         | Expr::TileArmy(_) => None,
@@ -191,6 +192,7 @@ fn replace_subtree_at_index(expr: &Expr, donor: &Expr, mut index: usize) -> Opti
         | Expr::MapHeight
         | Expr::IterX
         | Expr::IterY
+        | Expr::Reg(_)
         | Expr::TileType(_)
         | Expr::TileOwner(_)
         | Expr::TileArmy(_) => None,
